@@ -38,9 +38,6 @@ jobs:
           import os
           open("token.json", "w", encoding="utf-8").write(os.environ["GOOGLE_TOKEN_JSON"])
 
-      - name: Preview the build (scan only)
-        run: python build_exe.py --dry-run --ci
-
       - name: Build (downloads ffmpeg + models automatically)
         run: python build_exe.py --ci --no-zip
 

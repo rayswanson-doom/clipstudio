@@ -210,7 +210,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--no-zip", action="store_true", help="do not create the final zip")
     a = ap.parse_args(argv)
     include_token = not a.no_token
-    can_download = not a.no_download and not a.dry_run
+    # A plain --dry-run changes nothing; a CI dry-run may fetch ffmpeg/models like the real build.
+    can_download = not a.no_download and (not a.dry_run or a.ci)
 
     ensure_ffmpeg(ROOT, can_download)
     ensure_blazeface(ROOT, can_download)
