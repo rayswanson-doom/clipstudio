@@ -1,0 +1,13 @@
+# secrets - never commit these
+token.json
+credentials.json
+*.token.json
+# build + runtime output
+dist/
+build/
+outputs/
+downloads/
+.venv/
+__pycache__/
+*.pyc
+models/faster-whisper-base/

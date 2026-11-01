@@ -1,0 +1,3 @@
+Place the Windows ffmpeg.exe in this folder (bin\ffmpeg.exe).
+Download: https://www.gyan.dev/ffmpeg/builds/  ->  ffmpeg-release-essentials.zip  ->  bin\ffmpeg.exe
+See BUILD_GUIDE.md, step 3.

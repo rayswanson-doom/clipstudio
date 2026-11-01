@@ -1,0 +1,13 @@
+yt-dlp
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+faster-whisper
+edge-tts
+opencv-python
+mediapipe
+numpy
+streamlit>=1.31
+playwright
+pyinstaller
+pytest

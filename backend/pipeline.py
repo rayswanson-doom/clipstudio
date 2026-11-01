@@ -1,0 +1,200 @@
+"""
+backend/pipeline.py
+
+The two end-to-end workflows behind the Streamlit UI. All the real work lives
+in the other backend modules; this file only wires them together and reports
+progress, so it can be tested without a browser.
+
+  run_vugola_pipeline : URL/file -> transcribe -> score highlights
+                        -> face-tracked 9:16 crops -> Google Drive
+  run_viewmax_pipeline: prompt -> script -> edge-tts voiceover
+                        -> merge with background video -> Google Drive
+"""
+
+from __future__ import annotations
+
+import asyncio
+import concurrent.futures
+import logging
+import re
+import time
+from pathlib import Path
+from typing import Callable, Optional
+
+try:  # package import (backend.pipeline) or plain module (pipeline)
+    from .scorer import find_viral_clips, generate_script
+    from .transcriber import transcribe_audio
+    from .tts_engine import DEFAULT_VOICE, generate_voiceover
+    from .uploader import download_media, drive_status, upload_to_google_drive
+    from .video_engine import create_vertical_short, merge_audio_with_video
+except ImportError:  # pragma: no cover
+    from scorer import find_viral_clips, generate_script
+    from transcriber import transcribe_audio
+    from tts_engine import DEFAULT_VOICE, generate_voiceover
+    from uploader import download_media, drive_status, upload_to_google_drive
+    from video_engine import create_vertical_short, merge_audio_with_video
+
+logger = logging.getLogger(__name__)
+
+ProgressCb = Callable[[str, float], None]
+
+NO_FOLDER_WARNING = "No Google Drive Folder ID set - the finished file was NOT uploaded."
+NO_AUTH_WARNING = (
+    "Google Drive is not connected (no token.json or credentials.json found) - the finished "
+    "file was saved on this computer but NOT uploaded."
+)
+NO_FACE_WARNING = (
+    "No face was detected, so clips use a plain centre crop. Face tracking works best when "
+    "the speaker's face is clearly visible."
+)
+
+
+def _usable_folder(folder_id: Optional[str], warnings: list) -> Optional[str]:
+    """The folder to upload to, or None (with a warning) when Drive can't be used.
+    Keeps the app working on a laptop that has no Google sign-in files."""
+    if not folder_id:
+        warnings.append(NO_FOLDER_WARNING)
+        return None
+    if drive_status() == "unavailable":
+        warnings.append(NO_AUTH_WARNING)
+        return None
+    return folder_id
+
+
+def _emit(progress: Optional[ProgressCb], stage: str, fraction: float) -> None:
+    if progress:
+        progress(stage, max(0.0, min(1.0, fraction)))
+
+
+def _safe_name(text: str, limit: int = 50) -> str:
+    return re.sub(r"[^\w\-.]+", "_", text).strip("_")[:limit] or "clip"
+
+
+def _run_async(coro):
+    """Run a coroutine from sync code, even if an event loop is already running."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
+# --------------------------------------------------------------------------- #
+# Tab 1 - Vugola AI mode
+# --------------------------------------------------------------------------- #
+def run_vugola_pipeline(
+    source: str,
+    folder_id: Optional[str],
+    top_n: int = 3,
+    min_len: float = 15.0,
+    max_len: float = 45.0,
+    output_dir: str = "outputs",
+    progress: Optional[ProgressCb] = None,
+    ffmpeg_path: Optional[str] = None,
+    detector=None,
+    allow_center_fallback: bool = False,
+) -> dict:
+    """Find the best highlights in `source` and export each as a vertical short.
+
+    Returns {"source_path", "word_count", "clips": [...], "warnings": [...]}.
+    Each clip: start, end, duration, score, reasons, text, output_path,
+    drive_link, error (None on success). One failing clip does not stop the rest.
+    """
+    warnings = []
+    folder_id = _usable_folder(folder_id, warnings)
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    _emit(progress, "Getting the video", 0.02)
+    local = download_media(source, str(out_dir / "downloads"))
+
+    _emit(progress, "Transcribing locally (this can take a while on CPU)", 0.10)
+    words = transcribe_audio(local)
+    if not words:
+        raise RuntimeError("No speech was detected in this video, so there is nothing to score.")
+
+    _emit(progress, "Scoring highlights", 0.45)
+    picks = find_viral_clips(words, top_n=top_n, min_len=min_len, max_len=max_len)
+    if not picks:
+        raise RuntimeError("Could not find any highlight ranges in this transcript.")
+
+    stem = _safe_name(Path(local).stem)
+    clips = []
+    for idx, pick in enumerate(picks, start=1):
+        _emit(progress, f"Cropping and uploading clip {idx} of {len(picks)}", 0.50 + 0.48 * (idx - 1) / len(picks))
+        clip = {**pick, "output_path": None, "drive_link": None, "error": None, "faces_found": None}
+        target = out_dir / f"{stem}_clip{idx}_{int(pick['start'])}-{int(pick['end'])}.mp4"
+        try:
+            res = create_vertical_short(
+                local, str(target),
+                start_time=pick["start"], end_time=pick["end"],
+                folder_id=folder_id or None, ffmpeg_path=ffmpeg_path,
+                detector=detector, allow_center_fallback=allow_center_fallback,
+                upload=bool(folder_id),
+            )
+            clip["output_path"] = res["output_path"]
+            clip["drive_link"] = res["drive_link"]
+            clip["faces_found"] = res["faces_found"]
+        except Exception as exc:  # keep going; report per clip
+            logger.exception("Clip %d failed", idx)
+            clip["error"] = str(exc)
+            if target.is_file():  # clip was made but the upload failed
+                clip["output_path"] = str(target.resolve())
+        clips.append(clip)
+
+    made = [c for c in clips if c["faces_found"] is not None]
+    if made and all(c["faces_found"] == 0 for c in made):
+        warnings.append(NO_FACE_WARNING)
+
+    _emit(progress, "Done", 1.0)
+    return {"source_path": local, "word_count": len(words), "clips": clips, "warnings": warnings}
+
+
+# --------------------------------------------------------------------------- #
+# Tab 2 - Viewmax mode
+# --------------------------------------------------------------------------- #
+def run_viewmax_pipeline(
+    prompt: str,
+    folder_id: Optional[str],
+    background_video: Optional[str] = None,
+    voice: str = DEFAULT_VOICE,
+    output_dir: str = "outputs",
+    progress: Optional[ProgressCb] = None,
+    ffmpeg_path: Optional[str] = None,
+) -> dict:
+    """Prompt -> script -> voiceover -> merged vertical video -> Drive.
+
+    Returns {"script": {...}, "audio_path", "video_path", "drive_link", "warnings"}.
+    """
+    if not prompt or not prompt.strip():
+        raise ValueError("Please enter a prompt first.")
+    warnings = []
+    folder_id = _usable_folder(folder_id, warnings)
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = int(time.time())
+
+    _emit(progress, "Writing the script", 0.05)
+    script = generate_script(prompt)
+
+    _emit(progress, "Generating the voiceover (edge-tts, needs internet)", 0.25)
+    audio_path = out_dir / f"voice_{stamp}.mp3"
+    audio_path = _run_async(generate_voiceover(script["script"], str(audio_path), voice=voice))
+
+    _emit(progress, "Merging audio and video", 0.60)
+    video_path = merge_audio_with_video(
+        audio_path, str(out_dir / f"viewmax_{_safe_name(script['topic'], 30)}_{stamp}.mp4"),
+        background_video=background_video, ffmpeg_path=ffmpeg_path,
+    )
+
+    drive_link = None
+    if folder_id:
+        _emit(progress, "Uploading to Google Drive", 0.85)
+        drive_link = upload_to_google_drive(video_path, folder_id)
+
+    _emit(progress, "Done", 1.0)
+    return {
+        "script": script, "audio_path": audio_path, "video_path": video_path,
+        "drive_link": drive_link, "warnings": warnings,
+    }
