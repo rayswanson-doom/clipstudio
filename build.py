@@ -46,7 +46,7 @@ APP_NAME = "ClipStudio"
 
 BACKEND_MODULES = ["pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine"]
 REQUIRED_SOURCES = [
-    "launcher.py", "frontend/app.py",
+    "launcher.py", "selftest.py", "frontend/app.py",
     *[f"backend/{m}.py" for m in BACKEND_MODULES],
 ]
 
@@ -64,7 +64,7 @@ PIP_NAMES = {  # import name -> pip package name, where they differ
     "faster_whisper": "faster-whisper",
 }
 HIDDEN_IMPORTS = [
-    *BACKEND_MODULES,
+    *BACKEND_MODULES, "selftest",
     "google.auth.transport.requests", "google.oauth2.credentials",
     "googleapiclient.discovery", "googleapiclient.http",
     "google_auth_oauthlib.flow", "mediapipe.tasks.python.vision",

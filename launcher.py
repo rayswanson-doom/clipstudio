@@ -172,6 +172,11 @@ def main() -> int:
         print(exc, file=sys.stderr)
         return 1
 
+    if "--selftest" in sys.argv[1:]:  # ClipStudio.exe --selftest : check the build, then exit
+        import selftest
+
+        return selftest.main(app)
+
     if is_streamlit_running(PREFERRED_PORT):  # already running: just show it
         webbrowser.open(f"http://localhost:{PREFERRED_PORT}")
         return 0

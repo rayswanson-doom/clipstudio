@@ -41,6 +41,15 @@ jobs:
       - name: Build (downloads ffmpeg + models automatically)
         run: python build_exe.py --ci --no-zip
 
+      - name: Self-test the packaged exe (imports, ffmpeg, face model, Whisper, a real clip, the app page)
+        shell: pwsh
+        run: |
+          $st = Join-Path $env:RUNNER_TEMP "selftest"
+          Copy-Item dist\ClipStudio $st -Recurse
+          $p = Start-Process -FilePath "$st\ClipStudio.exe" -ArgumentList "--selftest" -Wait -PassThru
+          if (Test-Path "$st\clipstudio.log") { Get-Content "$st\clipstudio.log" }
+          if ($p.ExitCode -ne 0) { throw "ClipStudio.exe --selftest failed (exit code $($p.ExitCode))" }
+
       - name: Smoke test - the exe must start and answer its health check
         shell: pwsh
         run: |
