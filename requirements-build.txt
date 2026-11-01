@@ -3,6 +3,7 @@ google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
 faster-whisper
+av>=13,<16  # faster-whisper 1.2.x breaks on PyAV 17+ (metadata_errors)
 edge-tts
 opencv-python
 mediapipe
