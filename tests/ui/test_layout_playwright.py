@@ -75,10 +75,28 @@ class LayoutTests(unittest.TestCase):
         cls.pw.stop()
         cls.server.terminate()
 
+    def setUp(self):
+        self.opened = []
+
+    def tearDown(self):
+        # pages a failing test never closed: keep a picture of what was on screen
+        for n, page in enumerate(self.opened):
+            if not page.is_closed():
+                try:
+                    page.screenshot(path=str(SHOTS / f"FAIL_{self._testMethodName}_{n}.png"), full_page=True)
+                except Exception:
+                    pass
+                page.close()
+
     def open(self, width=1280, height=800, demo=False):
         page = self.browser.new_page(viewport={"width": width, "height": height})
+        self.opened.append(page)
         page.goto(URL + ("/?demo=1" if demo else ""))
         page.get_by_role("tab", name="🎬 Clip Repurposer Studio").wait_for(timeout=30000)
+        # Streamlit paints progressively: wait for the real controls, not just the tab strip
+        page.get_by_label("YouTube URL").wait_for(state="visible", timeout=30000)
+        if width > 640:
+            page.get_by_label("Google Drive Folder ID").wait_for(state="visible", timeout=30000)
         return page
 
     def assert_no_horizontal_overflow(self, page):
