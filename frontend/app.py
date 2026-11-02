@@ -144,7 +144,9 @@ h1,h2,h3,h4{letter-spacing:-.01em;}
 [role="tablist"] [role="tab"]:hover{color:var(--cp-text);background:var(--cp-card-2);}
 [role="tablist"] [role="tab"][aria-selected="true"]{background:var(--cp-grad);color:#fff !important;box-shadow:0 8px 24px rgba(139,92,246,.4);}
 [data-baseweb="tab-highlight"],[data-baseweb="tab-border"],[role="tablist"] [data-testid="stTabHighlight"]{display:none !important;}
-[role="tablist"] [role="tab"]{border-bottom:0 !important;}
+[role="tablist"] [role="tab"]{border-bottom:0 !important;transition:none !important;}
+[role="tablist"] > :not([role="tab"]){display:none !important;}
+[role="tablist"] [role="tab"][aria-selected="true"],[role="tablist"] [role="tab"][aria-selected="true"] *{color:#fff !important;}
 [role="tablist"]::after,[role="tablist"] [role="tab"]::after{display:none !important;}
 [role="tabpanel"]{padding-top:1.3rem;}
 
