@@ -135,16 +135,18 @@ h1,h2,h3,h4{letter-spacing:-.01em;}
 .cp-step b{color:var(--cp-a2);margin-right:.3rem;}
 
 /* ---------- tabs ---------- */
-[data-baseweb="tab-list"]{
+[role="tablist"]{
   gap:.4rem;padding:.35rem;border-radius:16px;background:var(--cp-card);
   border:1px solid var(--cp-border);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
   flex-wrap:wrap;
 }
-[data-baseweb="tab-list"] button[role="tab"]{height:auto;padding:.6rem 1.15rem;border-radius:12px !important;color:var(--cp-muted);font-weight:600;transition:all .2s ease;}
-[data-baseweb="tab-list"] button[role="tab"]:hover{color:var(--cp-text);background:var(--cp-card-2);}
-[data-baseweb="tab-list"] button[role="tab"][aria-selected="true"]{background:var(--cp-grad);color:#fff !important;box-shadow:0 8px 24px rgba(139,92,246,.4);}
-[data-baseweb="tab-highlight"],[data-baseweb="tab-border"]{display:none !important;}
-.stTabs [data-baseweb="tab-panel"]{padding-top:1.3rem;}
+[role="tablist"] [role="tab"]{height:auto;padding:.6rem 1.15rem;border-radius:12px !important;color:var(--cp-muted);font-weight:600;transition:all .2s ease;}
+[role="tablist"] [role="tab"]:hover{color:var(--cp-text);background:var(--cp-card-2);}
+[role="tablist"] [role="tab"][aria-selected="true"]{background:var(--cp-grad);color:#fff !important;box-shadow:0 8px 24px rgba(139,92,246,.4);}
+[data-baseweb="tab-highlight"],[data-baseweb="tab-border"],[role="tablist"] [data-testid="stTabHighlight"]{display:none !important;}
+[role="tablist"] [role="tab"]{border-bottom:0 !important;}
+[role="tablist"]::after,[role="tablist"] [role="tab"]::after{display:none !important;}
+[role="tabpanel"]{padding-top:1.3rem;}
 
 /* ---------- inputs ---------- */
 .stTextInput input,.stTextArea textarea,[data-baseweb="select"]>div,[data-baseweb="input"]{
@@ -184,7 +186,7 @@ video,audio{border-radius:14px;max-width:100%;}
   .block-container{padding:1rem .8rem 3rem;}
   .cp-hero{padding:1rem 1.05rem;gap:.8rem;border-radius:18px;}
   .cp-hero h1{font-size:1.6rem;} .cp-hero .logo{width:46px;height:46px;font-size:1.5rem;}
-  [data-baseweb="tab-list"] button[role="tab"]{padding:.5rem .8rem;font-size:.9rem;flex:1 1 auto;justify-content:center;}
+  [role="tablist"] [role="tab"]{padding:.5rem .8rem;font-size:.9rem;flex:1 1 auto;justify-content:center;}
   .cp-stat .v{font-size:1.3rem;} .cp-thumb{max-height:220px;aspect-ratio:16/9;}
 }
 @media (prefers-reduced-motion:reduce){ *{transition:none !important;} }
@@ -475,7 +477,7 @@ def render_hero() -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title=APP_NAME, page_icon="🎬", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title=APP_NAME, page_icon="🎬", layout="wide", initial_sidebar_state="auto")
     inject_css()
     if _demo_mode():  # ?demo=1 -> sample cards for previewing the layout
         st.session_state.setdefault("vugola_result", DEMO_CLIPS)

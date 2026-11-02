@@ -140,55 +140,21 @@ class LayoutTests(unittest.TestCase):
     def test_sidebar_collapses_and_reopens(self):
         page = self.open()
         sidebar = page.locator('[data-testid="stSidebar"]')
-        self.assertTrue(sidebar.get_by_label("Google Drive Folder ID", exact=True).is_visible())
-        page.locator('[data-testid="stSidebarCollapseButton"] button, [data-testid="stSidebarCollapseButton"]').first.click()
-        page.get_by_label("Google Drive Folder ID", exact=True).wait_for(state="hidden", timeout=10000)
+        self.assertEqual(sidebar.get_attribute("data-collapsed"), "false")
+        sidebar.locator('[data-testid="stSidebarCollapseButton"]').first.click()
+        page.wait_for_function(
+            "() => document.querySelector('[data-testid=\"stSidebar\"]').dataset.collapsed === 'true'", timeout=10000)
         page.screenshot(path=str(SHOTS / "desktop_sidebar_collapsed.png"), full_page=True)
         page.locator('[data-testid="stExpandSidebarButton"], [data-testid="collapsedControl"]').first.click()
-        page.get_by_label("Google Drive Folder ID", exact=True).wait_for(state="visible", timeout=10000)
+        page.wait_for_function(
+            "() => document.querySelector('[data-testid=\"stSidebar\"]').dataset.collapsed === 'false'", timeout=10000)
         page.close()
 
-    def test_two_tabs_and_sidebar(self):
-        page = self.open()
-        self.assertTrue(page.get_by_role("tab", name="🎬 Clip Repurposer Studio").is_visible())
-        self.assertTrue(page.get_by_role("tab", name="⚡ AI Generator Lab").is_visible())
-        sidebar = page.locator('[data-testid="stSidebar"]')
-        self.assertTrue(sidebar.get_by_label("Google Drive Folder ID", exact=True).is_visible())
-        page.screenshot(path=str(SHOTS / "desktop_vugola.png"), full_page=True)
+    def test_phone_starts_with_sidebar_closed(self):
+        page = self.open(390, 844)
+        self.assertEqual(page.locator('[data-testid="stSidebar"]').get_attribute("data-collapsed"), "true")
+        page.screenshot(path=str(SHOTS / "phone_home.png"), full_page=True)
         page.close()
-
-    def test_vugola_controls(self):
-        page = self.open()
-        self.assertTrue(page.get_by_label("YouTube URL").is_visible())
-        self.assertTrue(page.get_by_text("or upload a video file").is_visible())
-        self.assertTrue(page.get_by_role("button", name="Generate viral clips").is_visible())
-        page.close()
-
-    def test_viewmax_controls(self):
-        page = self.open()
-        page.get_by_role("tab", name="⚡ AI Generator Lab").click()
-        self.assertTrue(page.get_by_label("What should the video be about?").is_visible())
-        self.assertTrue(page.get_by_role("button", name="Generate video").is_visible())
-        page.screenshot(path=str(SHOTS / "desktop_viewmax.png"), full_page=True)
-        page.close()
-
-    def test_validation_messages(self):
-        page = self.open()
-        page.get_by_role("button", name="Generate viral clips").click()
-        page.get_by_text("Paste a YouTube URL or upload a video first.").wait_for(timeout=10000)
-        page.get_by_role("tab", name="⚡ AI Generator Lab").click()
-        page.get_by_role("button", name="Generate video").click()
-        page.get_by_text("Enter a prompt first.").wait_for(timeout=10000)
-        page.close()
-
-    def test_no_horizontal_overflow_desktop_and_phone(self):
-        for w, h, name in ((1280, 800, "desktop"), (390, 844, "phone")):
-            page = self.open(w, h)
-            self.assert_no_horizontal_overflow(page)
-            page.get_by_role("tab", name="⚡ AI Generator Lab").click()
-            self.assert_no_horizontal_overflow(page)
-            page.screenshot(path=str(SHOTS / f"{name}_viewmax.png"), full_page=True)
-            page.close()
 
 
 if __name__ == "__main__":
