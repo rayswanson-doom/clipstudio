@@ -2,7 +2,7 @@ name: Build Windows exe
 
 # Run it by hand: Actions tab -> "Build Windows exe" -> Run workflow.
 # It builds on a free GitHub Windows machine, starts the finished exe to prove it
-# boots, and publishes ClipStudio-Final-Executable.zip as a downloadable artifact.
+# boots, and publishes CinePulseAI-Final-Executable.zip as a downloadable artifact.
 on:
   workflow_dispatch:
 
@@ -45,17 +45,17 @@ jobs:
         shell: pwsh
         run: |
           $st = Join-Path $env:RUNNER_TEMP "selftest"
-          Copy-Item dist\ClipStudio $st -Recurse
-          $p = Start-Process -FilePath "$st\ClipStudio.exe" -ArgumentList "--selftest" -Wait -PassThru
-          if (Test-Path "$st\clipstudio.log") { Get-Content "$st\clipstudio.log" }
-          if ($p.ExitCode -ne 0) { throw "ClipStudio.exe --selftest failed (exit code $($p.ExitCode))" }
+          Copy-Item dist\CinePulseAI $st -Recurse
+          $p = Start-Process -FilePath "$st\CinePulseAI.exe" -ArgumentList "--selftest" -Wait -PassThru
+          if (Test-Path "$st\cinepulseai.log") { Get-Content "$st\cinepulseai.log" }
+          if ($p.ExitCode -ne 0) { throw "CinePulseAI.exe --selftest failed (exit code $($p.ExitCode))" }
 
       - name: Smoke test - the exe must start and answer its health check
         shell: pwsh
         run: |
           $smoke = Join-Path $env:RUNNER_TEMP "smoke"
-          Copy-Item dist\ClipStudio $smoke -Recurse
-          $proc = Start-Process -FilePath "$smoke\ClipStudio.exe" -PassThru
+          Copy-Item dist\CinePulseAI $smoke -Recurse
+          $proc = Start-Process -FilePath "$smoke\CinePulseAI.exe" -PassThru
           $ok = $false
           for ($i = 0; $i -lt 120; $i++) {
             Start-Sleep -Seconds 2
@@ -64,18 +64,18 @@ jobs:
               if ($r.StatusCode -eq 200) { $ok = $true; break }
             } catch { }
           }
-          if (Test-Path "$smoke\clipstudio.log") { Get-Content "$smoke\clipstudio.log" -Tail 60 }
-          Get-Process -Name ClipStudio -ErrorAction SilentlyContinue | Stop-Process -Force
-          if (-not $ok) { throw "ClipStudio.exe did not start within 4 minutes" }
+          if (Test-Path "$smoke\cinepulseai.log") { Get-Content "$smoke\cinepulseai.log" -Tail 60 }
+          Get-Process -Name CinePulseAI -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (-not $ok) { throw "CinePulseAI.exe did not start within 4 minutes" }
           Write-Host "Smoke test passed: the exe started and the app answered."
 
       - name: Make the zip
-        run: python -c "import build_exe, pathlib; print(build_exe.make_zip(pathlib.Path('dist/ClipStudio'), pathlib.Path('dist/ClipStudio-Final-Executable.zip')))"
+        run: python -c "import build_exe, pathlib; print(build_exe.make_zip(pathlib.Path('dist/CinePulseAI'), pathlib.Path('dist/CinePulseAI-Final-Executable.zip')))"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ClipStudio-Final-Executable
-          path: dist/ClipStudio-Final-Executable.zip
+          name: CinePulseAI-Final-Executable
+          path: dist/CinePulseAI-Final-Executable.zip
           retention-days: 14
           compression-level: 0
 
@@ -85,4 +85,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "build-$env:GITHUB_RUN_NUMBER"
-          gh release create $tag "dist/ClipStudio-Final-Executable.zip" --repo $env:GITHUB_REPOSITORY --title "Clip Studio build $env:GITHUB_RUN_NUMBER" --notes "Windows build. Download the zip, unzip it, double-click ClipStudio.exe inside the ClipStudio folder."
+          gh release create $tag "dist/CinePulseAI-Final-Executable.zip" --repo $env:GITHUB_REPOSITORY --title "CinePulse AI build $env:GITHUB_RUN_NUMBER" --notes "Windows build. Download the zip, unzip it, double-click CinePulseAI.exe inside the CinePulseAI folder."

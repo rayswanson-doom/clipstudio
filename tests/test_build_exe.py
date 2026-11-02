@@ -166,7 +166,7 @@ class PlacementTests(unittest.TestCase):
 
 class FinishTests(unittest.TestCase):
     def dist(self, d, internal=True):
-        app = Path(d) / "dist" / "ClipStudio"
+        app = Path(d) / "dist" / "CinePulseAI"
         base = app / "_internal" if internal else app
         (base / "bin").mkdir(parents=True)
         (base / "bin" / "ffmpeg.exe").write_bytes(b"MZ")
@@ -186,7 +186,7 @@ class FinishTests(unittest.TestCase):
             self.assertEqual(copied, ["token.json"])
             self.assertEqual(json.loads((app / "token.json").read_text()), GOOD_TOKEN)
             text = (app / "README.txt").read_text()
-            for phrase in ("optional", "credentials.json", "token.json", "clipstudio.log"):
+            for phrase in ("optional", "credentials.json", "token.json", "cinepulseai.log"):
                 self.assertIn(phrase, text)
 
     def test_finalize_without_token(self):
@@ -206,7 +206,7 @@ class FinishTests(unittest.TestCase):
 
     def test_verify_reports_missing(self):
         with tempfile.TemporaryDirectory() as d:
-            app = Path(d) / "ClipStudio"
+            app = Path(d) / "CinePulseAI"
             app.mkdir()
             text = " ".join(build_exe.verify(app, include_token=True))
             for expected in ("was not produced", "ffmpeg.exe", "blaze_face", "model.bin", "token.json"):
@@ -218,9 +218,9 @@ class FinishTests(unittest.TestCase):
             z = build_exe.make_zip(app, Path(d) / "dist" / "out.zip")
             with zipfile.ZipFile(z) as zf:
                 names = zf.namelist()
-            self.assertTrue(all(n.startswith("ClipStudio/") for n in names))
-            self.assertIn(f"ClipStudio/{build.exe_name()}", names)
-            self.assertIn("ClipStudio/_internal/bin/ffmpeg.exe", names)
+            self.assertTrue(all(n.startswith("CinePulseAI/") for n in names))
+            self.assertIn(f"CinePulseAI/{build.exe_name()}", names)
+            self.assertIn("CinePulseAI/_internal/bin/ffmpeg.exe", names)
 
 
 class MainTests(unittest.TestCase):
@@ -242,7 +242,7 @@ class MainTests(unittest.TestCase):
             make_project(proj, token=GOOD_TOKEN)
 
             def fake_run(args):
-                app = proj / "dist" / "ClipStudio"
+                app = proj / "dist" / "CinePulseAI"
                 (app / "_internal").mkdir(parents=True)
                 for rel in (build.FFMPEG_REL, build.BLAZEFACE_REL, build.WHISPER_REL / "model.bin"):
                     (app / "_internal" / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -260,7 +260,7 @@ class MainTests(unittest.TestCase):
             z = proj / "dist" / build_exe.ZIP_NAME
             self.assertTrue(z.is_file())
             with zipfile.ZipFile(z) as zf:
-                self.assertIn("ClipStudio/token.json", zf.namelist())
+                self.assertIn("CinePulseAI/token.json", zf.namelist())
             self.assertNotIn("WARNING: ffmpeg", out.getvalue())
 
     def test_errors_stop_before_pyinstaller(self):

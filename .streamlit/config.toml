@@ -1,0 +1,13 @@
+# CinePulse AI - used when running `streamlit run frontend/app.py` directly.
+[theme]
+base = "dark"
+primaryColor = "#8B5CF6"
+backgroundColor = "#0B0B14"
+secondaryBackgroundColor = "#14142A"
+textColor = "#ECEEF8"
+
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false

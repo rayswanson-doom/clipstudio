@@ -429,7 +429,7 @@ def merge_audio_with_video(
     fps: int = 30,
 ) -> str:
     """Merge a voiceover with a background video (or a plain background) into a
-    vertical MP4 and return its path. Used by the text-to-video (Viewmax) flow."""
+    vertical MP4 and return its path. Used by the text-to-video (AI Generator Lab) flow."""
     if not Path(audio_path).is_file():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
     if background_video and not Path(background_video).is_file():

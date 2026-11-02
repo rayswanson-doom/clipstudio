@@ -81,7 +81,7 @@ def _run_async(coro):
 
 
 # --------------------------------------------------------------------------- #
-# Tab 1 - Vugola AI mode
+# Tab 1 - Clip Repurposer Studio
 # --------------------------------------------------------------------------- #
 def run_vugola_pipeline(
     source: str,
@@ -152,7 +152,7 @@ def run_vugola_pipeline(
 
 
 # --------------------------------------------------------------------------- #
-# Tab 2 - Viewmax mode
+# Tab 2 - AI Generator Lab
 # --------------------------------------------------------------------------- #
 def run_viewmax_pipeline(
     prompt: str,

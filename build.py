@@ -1,5 +1,5 @@
 """
-build.py  -  package Clip Studio into a double-clickable Windows folder.
+build.py  -  package CinePulse AI into a double-clickable Windows folder.
 
     python build.py              # preflight + PyInstaller build + assemble
     python build.py --dry-run    # preflight only, prints the PyInstaller command
@@ -17,7 +17,7 @@ What it does
      mediapipe, faster_whisper and cv2 (plus the other packages the pipeline
      needs: ctranslate2, googleapiclient, yt_dlp, ...).
   4. Copies bin/ffmpeg.exe, models/ and token.json NEXT TO the exe in
-     dist/ClipStudio/, which is where the app looks for them, and verifies it.
+     dist/CinePulseAI/, which is where the app looks for them, and verifies it.
 
 Internet is still needed at RUN time for the parts that are online by nature:
 YouTube downloads, edge-tts voices, and the Google Drive upload.
@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import List, Optional
 
 ROOT = Path(__file__).resolve().parent
-APP_NAME = "ClipStudio"
+APP_NAME = "CinePulseAI"
 
 BACKEND_MODULES = ["pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine"]
 REQUIRED_SOURCES = [
@@ -272,10 +272,10 @@ def assemble(app_dir: Path, root: Path = ROOT, include_token: bool = True) -> Li
         copied.append(TOKEN_REL.as_posix())
 
     (app_dir / "README.txt").write_text(
-        f"Clip Studio\n===========\n\nDouble-click {exe_name()}. Your browser opens the app at "
+        f"CinePulse AI\n===========\n\nDouble-click {exe_name()}. Your browser opens the app at "
         "http://localhost:8501 (the next free port is used if that one is busy).\n"
-        "There is no console window; use the 'Quit Clip Studio' button in the sidebar to stop it.\n"
-        "A log is written to clipstudio.log in this folder.\n\n"
+        "There is no console window; use the 'Quit CinePulse AI' button in the sidebar to stop it.\n"
+        "A log is written to cinepulseai.log in this folder.\n\n"
         "Needs internet for: YouTube downloads, edge-tts voices, Google Drive upload.\n"
         "Transcription, scoring, cropping and merging run fully offline.\n\n"
         "Google Drive: enter your Drive Folder ID in the sidebar. "
@@ -305,7 +305,7 @@ def verify_dist(app_dir: Path, include_token: bool = True) -> List[str]:
 
 # --------------------------------------------------------------------------- #
 def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="Build the Clip Studio distribution folder")
+    ap = argparse.ArgumentParser(description="Build the CinePulse AI distribution folder")
     ap.add_argument("--dry-run", action="store_true", help="run the preflight and print the command only")
     ap.add_argument("--no-token", action="store_true", help="do not bundle token.json")
     ap.add_argument("--require-token", action="store_true", help="fail if token.json is missing")

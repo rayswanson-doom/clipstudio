@@ -1,17 +1,24 @@
 """
-frontend/app.py  -  Streamlit UI
+frontend/app.py  -  CinePulse AI  (Streamlit UI)
 
-Run:  streamlit run frontend/app.py
+Run:  streamlit run frontend/app.py          (or double-click the packaged exe)
 
-Tab 1  Vugola AI Mode : YouTube URL / file -> local transcription -> local
-       highlight scoring -> MediaPipe face-tracked crop -> Google Drive backup
-Tab 2  Viewmax Mode   : text prompt -> script -> edge-tts voiceover
+  🎬 Clip Repurposer Studio : YouTube URL / file -> local transcription -> local
+       highlight scoring -> MediaPipe face-tracked 9:16 crop -> Google Drive backup
+  ⚡ AI Generator Lab        : text prompt -> script -> local edge-tts voiceover
        -> video merge -> Google Drive upload
-Sidebar: Google Drive Folder ID (plus Google sign-in status).
+  Sidebar (collapsible): Google Drive Folder ID + connection status.
+
+Design: dark glassmorphism, violet->cyan->pink accent gradients, card containers
+for outputs, metric badges. Responsive down to phone width. All styling is plain
+CSS injected below; no external fonts or network assets, so it works offline.
+
+Add ?demo=1 to the address to preview the layout with sample results.
 """
 
 from __future__ import annotations
 
+import html
 import os
 import sys
 import tempfile
@@ -26,6 +33,11 @@ import streamlit as st  # noqa: E402
 import pipeline  # noqa: E402
 import uploader  # noqa: E402
 
+APP_NAME = "CinePulse AI"
+TAB_CLIP = "🎬 Clip Repurposer Studio"
+TAB_LAB = "⚡ AI Generator Lab"
+
+
 def _output_dir() -> Path:
     """outputs/ next to the exe when packaged (or the temp dir if that folder is
     read-only, e.g. under Program Files); the project folder otherwise."""
@@ -35,18 +47,177 @@ def _output_dir() -> Path:
         target.mkdir(parents=True, exist_ok=True)
         return target
     except OSError:
-        fallback = Path(tempfile.gettempdir()) / "ClipStudio" / "outputs"
+        fallback = Path(tempfile.gettempdir()) / "CinePulseAI" / "outputs"
         fallback.mkdir(parents=True, exist_ok=True)
         return fallback
 
 
 OUTPUT_DIR = _output_dir()
-UPLOAD_DIR = Path(tempfile.gettempdir()) / "clipstudio_uploads"
+UPLOAD_DIR = Path(tempfile.gettempdir()) / "cinepulse_uploads"
 VIDEO_TYPES = ["mp4", "mov", "mkv", "webm", "avi"]
 VOICES = [
     "en-US-AriaNeural", "en-US-GuyNeural", "en-US-JennyNeural",
     "en-GB-SoniaNeural", "en-GB-RyanNeural", "en-AU-NatashaNeural", "en-IN-NeerjaNeural",
 ]
+
+# --------------------------------------------------------------------------- #
+# design system (CSS)
+# --------------------------------------------------------------------------- #
+CSS = """
+<style>
+:root{
+  --cp-bg:#0b0b14; --cp-card:rgba(255,255,255,.05); --cp-card-2:rgba(255,255,255,.08);
+  --cp-border:rgba(255,255,255,.11); --cp-text:#eceef8; --cp-muted:#9aa0b8;
+  --cp-a1:#8b5cf6; --cp-a2:#22d3ee; --cp-a3:#f472b6; --cp-ok:#34d399; --cp-warn:#fbbf24;
+  --cp-grad:linear-gradient(135deg,var(--cp-a1) 0%,var(--cp-a2) 100%);
+  --cp-grad-hot:linear-gradient(135deg,var(--cp-a1) 0%,var(--cp-a3) 100%);
+}
+.stApp{
+  background:
+    radial-gradient(1100px 560px at 8% -8%, rgba(139,92,246,.28), transparent 62%),
+    radial-gradient(900px 520px at 100% 0%, rgba(34,211,238,.18), transparent 58%),
+    radial-gradient(800px 600px at 50% 120%, rgba(244,114,182,.12), transparent 60%),
+    var(--cp-bg);
+  color:var(--cp-text);
+}
+header[data-testid="stHeader"]{background:transparent;}
+.block-container{padding-top:2.2rem;padding-bottom:4rem;max-width:1180px;}
+h1,h2,h3,h4{letter-spacing:-.01em;}
+
+/* ---------- sidebar (collapsible natively via the chevron) ---------- */
+[data-testid="stSidebar"]{
+  background:rgba(14,14,28,.72);
+  backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
+  border-right:1px solid var(--cp-border);
+}
+.cp-brand{display:flex;align-items:center;gap:.7rem;margin:.2rem 0 1.1rem;}
+.cp-brand .logo{width:38px;height:38px;border-radius:11px;background:var(--cp-grad);display:grid;place-items:center;font-size:1.25rem;box-shadow:0 6px 22px rgba(139,92,246,.45);}
+.cp-brand b{font-size:1.1rem;} .cp-brand small{display:block;color:var(--cp-muted);font-size:.72rem;margin-top:-2px;}
+.cp-side-title{color:var(--cp-muted);font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;margin:1.1rem 0 .4rem;}
+
+/* ---------- hero ---------- */
+.cp-hero{
+  display:flex;align-items:center;gap:1.1rem;flex-wrap:wrap;
+  padding:1.4rem 1.6rem;margin-bottom:1.3rem;border-radius:22px;
+  background:linear-gradient(135deg,rgba(139,92,246,.18),rgba(34,211,238,.08));
+  border:1px solid var(--cp-border);
+  backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+  box-shadow:0 18px 50px rgba(0,0,0,.35);
+}
+.cp-hero .logo{width:58px;height:58px;border-radius:17px;background:var(--cp-grad);display:grid;place-items:center;font-size:1.9rem;box-shadow:0 10px 30px rgba(139,92,246,.5);flex:none;}
+.cp-hero h1{margin:0;padding:0;font-size:2.15rem;line-height:1.1;font-weight:800;}
+.cp-hero h1 span{background:var(--cp-grad-hot);-webkit-background-clip:text;background-clip:text;color:transparent;}
+.cp-hero p{margin:.3rem 0 0;color:var(--cp-muted);font-size:.98rem;}
+.cp-hero .grow{flex:1 1 260px;min-width:0;}
+.cp-pills{display:flex;gap:.45rem;flex-wrap:wrap;}
+
+/* ---------- badges, pills, stat tiles ---------- */
+.cp-pill,.cp-badge{
+  display:inline-flex;align-items:center;gap:.35rem;padding:.28rem .7rem;border-radius:999px;
+  font-size:.78rem;font-weight:600;color:var(--cp-text);
+  background:var(--cp-card-2);border:1px solid var(--cp-border);white-space:nowrap;
+}
+.cp-badge.score{background:var(--cp-grad);border-color:transparent;color:#fff;}
+.cp-badge.time{color:var(--cp-a2);} .cp-badge.ok{color:var(--cp-ok);} .cp-badge.warn{color:var(--cp-warn);}
+.cp-badge.face{color:var(--cp-a3);}
+.cp-dot{width:8px;height:8px;border-radius:50%;background:var(--cp-ok);box-shadow:0 0 10px var(--cp-ok);}
+.cp-chips{display:flex;gap:.4rem;flex-wrap:wrap;margin:.55rem 0 .2rem;}
+.cp-chip{font-size:.72rem;color:var(--cp-muted);padding:.16rem .55rem;border-radius:8px;background:rgba(255,255,255,.05);border:1px solid var(--cp-border);}
+.cp-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.8rem;margin:.4rem 0 1.1rem;}
+.cp-stat{padding:.9rem 1rem;border-radius:16px;background:var(--cp-card);border:1px solid var(--cp-border);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);}
+.cp-stat .v{font-size:1.6rem;font-weight:800;line-height:1.1;background:var(--cp-grad);-webkit-background-clip:text;background-clip:text;color:transparent;}
+.cp-stat .l{color:var(--cp-muted);font-size:.76rem;margin-top:.15rem;}
+
+/* ---------- section headers + step flow ---------- */
+.cp-section h3{margin:.2rem 0 .1rem;font-size:1.35rem;} .cp-section p{margin:0 0 .8rem;color:var(--cp-muted);}
+.cp-steps{display:flex;flex-wrap:wrap;gap:.45rem;margin:.2rem 0 1rem;}
+.cp-step{font-size:.78rem;padding:.3rem .75rem;border-radius:999px;background:var(--cp-card);border:1px solid var(--cp-border);color:var(--cp-muted);}
+.cp-step b{color:var(--cp-a2);margin-right:.3rem;}
+
+/* ---------- tabs ---------- */
+.stTabs [data-baseweb="tab-list"]{
+  gap:.4rem;padding:.35rem;border-radius:16px;background:var(--cp-card);
+  border:1px solid var(--cp-border);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  flex-wrap:wrap;
+}
+.stTabs [data-baseweb="tab"]{height:auto;padding:.6rem 1.15rem;border-radius:12px;color:var(--cp-muted);font-weight:600;transition:all .2s ease;}
+.stTabs [data-baseweb="tab"]:hover{color:var(--cp-text);background:var(--cp-card-2);}
+.stTabs [aria-selected="true"]{background:var(--cp-grad);color:#fff !important;box-shadow:0 8px 24px rgba(139,92,246,.4);}
+.stTabs [data-baseweb="tab-highlight"],.stTabs [data-baseweb="tab-border"]{display:none;}
+.stTabs [data-baseweb="tab-panel"]{padding-top:1.3rem;}
+
+/* ---------- inputs ---------- */
+.stTextInput input,.stTextArea textarea,[data-baseweb="select"]>div,[data-baseweb="input"]{
+  background:rgba(255,255,255,.06) !important;border-radius:12px !important;border:1px solid var(--cp-border) !important;color:var(--cp-text) !important;
+}
+.stTextInput input:focus,.stTextArea textarea:focus{border-color:var(--cp-a1) !important;box-shadow:0 0 0 3px rgba(139,92,246,.25) !important;}
+[data-testid="stFileUploaderDropzone"]{background:var(--cp-card);border:1.5px dashed rgba(139,92,246,.5);border-radius:16px;transition:all .2s ease;}
+[data-testid="stFileUploaderDropzone"]:hover{border-color:var(--cp-a2);background:var(--cp-card-2);}
+
+/* ---------- buttons ---------- */
+.stButton>button,.stLinkButton>a{border-radius:12px;font-weight:700;transition:transform .15s ease,box-shadow .2s ease,filter .2s ease;border:1px solid var(--cp-border);}
+.stButton>button[kind="primary"]{background:var(--cp-grad-hot);border:0;color:#fff;padding:.65rem 1.4rem;box-shadow:0 10px 28px rgba(139,92,246,.4);}
+.stButton>button:hover,.stLinkButton>a:hover{transform:translateY(-1px);filter:brightness(1.08);}
+.stButton>button[kind="primary"]:hover{box-shadow:0 14px 34px rgba(244,114,182,.45);}
+
+/* ---------- glass cards (bordered containers, expanders, alerts) ---------- */
+[data-testid="stVerticalBlockBorderWrapper"]{
+  background:var(--cp-card);border:1px solid var(--cp-border) !important;border-radius:20px !important;
+  backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);box-shadow:0 14px 40px rgba(0,0,0,.28);
+  transition:transform .2s ease,border-color .2s ease;
+}
+[data-testid="stVerticalBlockBorderWrapper"]:hover{border-color:rgba(139,92,246,.55) !important;}
+[data-testid="stExpander"]{background:var(--cp-card);border:1px solid var(--cp-border);border-radius:16px;}
+[data-testid="stAlert"]{border-radius:14px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border:1px solid var(--cp-border);}
+video,audio{border-radius:14px;max-width:100%;}
+.cp-thumb{aspect-ratio:9/16;max-height:340px;width:100%;border-radius:16px;display:grid;place-content:center;text-align:center;gap:.3rem;color:var(--cp-muted);
+  background:linear-gradient(160deg,rgba(139,92,246,.25),rgba(34,211,238,.10) 60%,rgba(244,114,182,.15));border:1px solid var(--cp-border);}
+.cp-thumb span{font-size:2.2rem;}
+.cp-clip-head{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;margin-bottom:.4rem;}
+.cp-rank{font-weight:800;font-size:1.1rem;background:var(--cp-grad-hot);-webkit-background-clip:text;background-clip:text;color:transparent;}
+.cp-quote{margin:.5rem 0;padding:.7rem .9rem;border-left:3px solid var(--cp-a1);border-radius:0 12px 12px 0;background:rgba(255,255,255,.04);color:var(--cp-text);font-size:.95rem;line-height:1.5;}
+.cp-foot{color:var(--cp-muted);font-size:.74rem;text-align:center;margin-top:2rem;}
+
+/* ---------- responsive ---------- */
+@media (max-width:900px){ .cp-stats{grid-template-columns:repeat(2,minmax(0,1fr));} }
+@media (max-width:640px){
+  .block-container{padding:1rem .8rem 3rem;}
+  .cp-hero{padding:1rem 1.05rem;gap:.8rem;border-radius:18px;}
+  .cp-hero h1{font-size:1.6rem;} .cp-hero .logo{width:46px;height:46px;font-size:1.5rem;}
+  .stTabs [data-baseweb="tab"]{padding:.5rem .8rem;font-size:.9rem;flex:1 1 auto;justify-content:center;}
+  .cp-stat .v{font-size:1.3rem;} .cp-thumb{max-height:220px;aspect-ratio:16/9;}
+}
+@media (prefers-reduced-motion:reduce){ *{transition:none !important;} }
+</style>
+"""
+
+
+def _e(value) -> str:
+    """HTML-escape anything that came from a user, a file or a model."""
+    return html.escape(str(value), quote=True)
+
+
+def inject_css() -> None:
+    st.markdown(CSS, unsafe_allow_html=True)
+
+
+def badge(text, tone: str = "") -> str:
+    return f'<span class="cp-badge {tone}">{_e(text)}</span>'
+
+
+def stat_tiles(items) -> str:
+    """items: [(value, label), ...] -> a responsive row of metric tiles."""
+    tiles = "".join(f'<div class="cp-stat"><div class="v">{_e(v)}</div><div class="l">{_e(l)}</div></div>' for v, l in items)
+    return f'<div class="cp-stats">{tiles}</div>'
+
+
+def steps_html(steps) -> str:
+    inner = "".join(f'<span class="cp-step"><b>{i}</b>{_e(s)}</span>' for i, s in enumerate(steps, start=1))
+    return f'<div class="cp-steps">{inner}</div>'
+
+
+def section_header(title: str, subtitle: str) -> None:
+    st.markdown(f'<div class="cp-section"><h3>{_e(title)}</h3><p>{_e(subtitle)}</p></div>', unsafe_allow_html=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -75,12 +246,45 @@ def show_warnings(warnings) -> None:
         st.warning(w)
 
 
+def _demo_mode() -> bool:
+    try:
+        return str(st.query_params.get("demo", "")) == "1"
+    except Exception:
+        return False
+
+
+DEMO_CLIPS = {
+    "source_path": "demo.mp4", "word_count": 1842, "warnings": [],
+    "clips": [
+        {"start": 42.0, "end": 71.5, "duration": 29.5, "score": 14.8, "faces_found": 884,
+         "reasons": ["question", "emotional_keywords", "dramatic_pause"], "output_path": None,
+         "drive_link": "https://drive.google.com/", "error": None,
+         "text": "Did you know the biggest mistake nobody warns you about is trying to do it all at once?"},
+        {"start": 190.0, "end": 228.0, "duration": 38.0, "score": 11.2, "faces_found": 0,
+         "reasons": ["number_or_stat", "direct_address"], "output_path": None, "drive_link": None,
+         "error": "Upload skipped: Google Drive is not connected.",
+         "text": "In three weeks you can change your whole routine with just 5 minutes a day."},
+    ],
+}
+DEMO_LAB = {
+    "script": {"script": "Stop scrolling. Here is how a morning routine really works. First, one small habit. "
+                         "Second, make it easy. Follow for more and share this with a friend.",
+               "word_count": 31, "estimated_seconds": 12.4, "topic": "a morning routine"},
+    "audio_path": None, "video_path": None, "drive_link": "https://drive.google.com/", "warnings": [],
+}
+
+
 # --------------------------------------------------------------------------- #
 # sidebar
 # --------------------------------------------------------------------------- #
 def render_sidebar() -> str:
     with st.sidebar:
-        st.header("Settings")
+        st.markdown(
+            f'<div class="cp-brand"><div class="logo">🎬</div><div><b>{APP_NAME}</b>'
+            '<small>Local video studio</small></div></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown('<div class="cp-side-title">Cloud backup</div>', unsafe_allow_html=True)
         folder_id = st.text_input(
             "Google Drive Folder ID",
             value=os.environ.get("GOOGLE_DRIVE_FOLDER_ID", ""),
@@ -102,22 +306,59 @@ def render_sidebar() -> str:
             )
         if not folder_id:
             st.info("Enter a Folder ID to turn on automatic Drive backup.")
-        st.caption("Everything runs locally, free, with no API keys. "
-                   "Only the Drive upload and edge-tts voices use the internet.")
+
+        st.markdown('<div class="cp-side-title">Privacy</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<span class="cp-pill"><span class="cp-dot"></span>Runs on this computer</span> '
+            '<span class="cp-pill">No API keys</span>',
+            unsafe_allow_html=True,
+        )
+        st.caption("Only YouTube downloads, edge-tts voices and the Drive upload use the internet.")
         if getattr(sys, "frozen", False):  # packaged exe has no console window to close
-            if st.button("Quit Clip Studio", key="quit_app"):
-                st.write("Closing Clip Studio. You can close this tab.")
+            if st.button("Quit CinePulse AI", key="quit_app"):
+                st.write("Closing CinePulse AI. You can close this tab.")
                 os._exit(0)
     return folder_id
 
 
 # --------------------------------------------------------------------------- #
-# tab 1 - Vugola AI mode
+# clip repurposer
 # --------------------------------------------------------------------------- #
-def render_vugola_tab(folder_id: str) -> None:
-    st.subheader("Vugola AI Mode")
-    st.caption("YouTube URL or video file → local transcription → highlight scoring "
-               "→ face-tracked 9:16 crop → automatic Google Drive backup")
+def render_clip_card(i: int, clip: dict) -> None:
+    with st.container(border=True):
+        left, right = st.columns([1, 2])
+        with left:
+            if clip.get("output_path"):
+                st.video(clip["output_path"])
+            else:
+                st.markdown('<div class="cp-thumb"><span>🎞️</span><small>Preview unavailable</small></div>',
+                            unsafe_allow_html=True)
+        with right:
+            badges = [badge(f"★ {clip['score']}", "score"),
+                      badge(f"{clip['duration']}s", "time"),
+                      badge(f"{clip['start']}s → {clip['end']}s", "time")]
+            faces = clip.get("faces_found")
+            if faces is not None:
+                badges.append(badge("face tracked" if faces else "centre crop", "face" if faces else "warn"))
+            badges.append(badge("backed up" if clip.get("drive_link") else "local only",
+                                "ok" if clip.get("drive_link") else "warn"))
+            st.markdown(f'<div class="cp-clip-head"><span class="cp-rank">#{i}</span>{"".join(badges)}</div>',
+                        unsafe_allow_html=True)
+            st.markdown(f'<div class="cp-quote">{_e(clip["text"])}</div>', unsafe_allow_html=True)
+            if clip.get("reasons"):
+                chips = "".join(f'<span class="cp-chip">{_e(r.replace("_", " "))}</span>' for r in clip["reasons"])
+                st.markdown(f'<div class="cp-chips">{chips}</div>', unsafe_allow_html=True)
+            if clip.get("drive_link"):
+                st.link_button("Open in Google Drive", clip["drive_link"])
+            if clip.get("error"):
+                st.error(clip["error"])
+
+
+def render_clip_tab(folder_id: str) -> None:
+    section_header("Clip Repurposer Studio",
+                   "Turn a long video into short vertical clips that follow the speaker's face.")
+    st.markdown(steps_html(["Source", "Transcribe", "Score highlights", "Face-tracked crop", "Drive backup"]),
+                unsafe_allow_html=True)
 
     url = st.text_input("YouTube URL", key="vugola_url",
                         placeholder="https://www.youtube.com/watch?v=...")
@@ -156,32 +397,25 @@ def render_vugola_tab(folder_id: str) -> None:
     result = st.session_state.get("vugola_result")
     if result:
         show_warnings(result.get("warnings"))
-        st.success(f"Found {len(result['clips'])} clip(s) from {result['word_count']} transcribed words.")
-        for i, clip in enumerate(result["clips"], start=1):
-            with st.container(border=True):
-                left, right = st.columns([1, 2])
-                with left:
-                    if clip.get("output_path"):
-                        st.video(clip["output_path"])
-                with right:
-                    st.markdown(f"**Clip {i}** · score {clip['score']} · "
-                                f"{clip['start']}s - {clip['end']}s ({clip['duration']}s)")
-                    if clip.get("reasons"):
-                        st.caption("Why: " + ", ".join(clip["reasons"]))
-                    st.write(clip["text"])
-                    if clip.get("drive_link"):
-                        st.link_button("Open in Google Drive", clip["drive_link"])
-                    if clip.get("error"):
-                        st.error(clip["error"])
+        clips = result["clips"]
+        uploaded_n = sum(1 for c in clips if c.get("drive_link"))
+        st.success(f"Found {len(clips)} clip(s) from {result['word_count']} transcribed words.")
+        best = max((c["score"] for c in clips), default=0)
+        st.markdown(stat_tiles([(len(clips), "Clips created"), (result["word_count"], "Words transcribed"),
+                                (best, "Top score"), (f"{uploaded_n}/{len(clips)}", "Backed up to Drive")]),
+                    unsafe_allow_html=True)
+        for i, clip in enumerate(clips, start=1):
+            render_clip_card(i, clip)
 
 
 # --------------------------------------------------------------------------- #
-# tab 2 - Viewmax mode
+# generator lab
 # --------------------------------------------------------------------------- #
-def render_viewmax_tab(folder_id: str) -> None:
-    st.subheader("Viewmax Mode")
-    st.caption("Text prompt → script generator → local edge-tts voiceover "
-               "→ video merge → Google Drive upload")
+def render_lab_tab(folder_id: str) -> None:
+    section_header("AI Generator Lab",
+                   "Describe a video. Get a script, a natural voiceover and a finished vertical video.")
+    st.markdown(steps_html(["Prompt", "Script", "Voiceover", "Video merge", "Drive upload"]),
+                unsafe_allow_html=True)
 
     prompt = st.text_area(
         "What should the video be about?", key="viewmax_prompt", height=120,
@@ -213,25 +447,48 @@ def render_viewmax_tab(folder_id: str) -> None:
     if result:
         show_warnings(result.get("warnings"))
         script = result["script"]
-        with st.expander("Generated script", expanded=True):
-            st.write(script["script"])
-            st.caption(f"{script['word_count']} words, about {script['estimated_seconds']}s")
-        st.audio(result["audio_path"])
-        st.video(result["video_path"])
-        if result.get("drive_link"):
-            st.link_button("Open in Google Drive", result["drive_link"])
+        st.markdown(stat_tiles([(script["word_count"], "Words"), (f"{script['estimated_seconds']}s", "Est. length"),
+                                ("Yes" if result.get("drive_link") else "No", "Backed up to Drive")]),
+                    unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown('<div class="cp-clip-head"><span class="cp-rank">Script</span></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="cp-quote">{_e(script["script"])}</div>', unsafe_allow_html=True)
+            if result.get("audio_path"):
+                st.audio(result["audio_path"])
+            if result.get("video_path"):
+                st.video(result["video_path"])
+            if result.get("drive_link"):
+                st.link_button("Open in Google Drive", result["drive_link"])
 
 
 # --------------------------------------------------------------------------- #
+def render_hero() -> None:
+    st.markdown(
+        '<div class="cp-hero"><div class="logo">🎬</div><div class="grow">'
+        f'<h1>CinePulse <span>AI</span></h1>'
+        '<p>Repurpose long videos into viral shorts, and turn ideas into finished videos, '
+        'right on your own computer.</p></div>'
+        '<div class="cp-pills"><span class="cp-pill"><span class="cp-dot"></span>Local &amp; private</span>'
+        '<span class="cp-pill">Free · no API keys</span></div></div>',
+        unsafe_allow_html=True,
+    )
+
+
 def main() -> None:
-    st.set_page_config(page_title="Clip Studio", page_icon="🎬", layout="wide")
-    st.title("Clip Studio")
+    st.set_page_config(page_title=APP_NAME, page_icon="🎬", layout="wide", initial_sidebar_state="expanded")
+    inject_css()
+    if _demo_mode():  # ?demo=1 -> sample cards for previewing the layout
+        st.session_state.setdefault("vugola_result", DEMO_CLIPS)
+        st.session_state.setdefault("viewmax_result", DEMO_LAB)
     folder_id = render_sidebar()
-    tab_vugola, tab_viewmax = st.tabs(["Vugola AI Mode", "Viewmax Mode"])
-    with tab_vugola:
-        render_vugola_tab(folder_id)
-    with tab_viewmax:
-        render_viewmax_tab(folder_id)
+    render_hero()
+    tab_clip, tab_lab = st.tabs([TAB_CLIP, TAB_LAB])
+    with tab_clip:
+        render_clip_tab(folder_id)
+    with tab_lab:
+        render_lab_tab(folder_id)
+    st.markdown(f'<div class="cp-foot">{APP_NAME} · everything runs locally · your files never leave this computer '
+                'except the Drive backup you enable</div>', unsafe_allow_html=True)
 
 
 if __name__ == "__main__":

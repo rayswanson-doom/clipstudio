@@ -100,7 +100,7 @@ class RunnerTests(unittest.TestCase):
 
 class LauncherDispatchTests(unittest.TestCase):
     def test_selftest_flag_runs_selftest_and_not_streamlit(self):
-        with mock.patch.object(sys, "argv", ["ClipStudio.exe", "--selftest"]), mock.patch.object(
+        with mock.patch.object(sys, "argv", ["CinePulseAI.exe", "--selftest"]), mock.patch.object(
             selftest, "main", return_value=0
         ) as m, mock.patch.object(launcher, "open_browser_when_ready") as ob:
             self.assertEqual(launcher.main(), 0)
@@ -109,7 +109,7 @@ class LauncherDispatchTests(unittest.TestCase):
         ob.assert_not_called()
 
     def test_selftest_failure_code_is_returned(self):
-        with mock.patch.object(sys, "argv", ["ClipStudio.exe", "--selftest"]), mock.patch.object(
+        with mock.patch.object(sys, "argv", ["CinePulseAI.exe", "--selftest"]), mock.patch.object(
             selftest, "main", return_value=1
         ):
             self.assertEqual(launcher.main(), 1)

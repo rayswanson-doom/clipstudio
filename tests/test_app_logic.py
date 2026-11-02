@@ -128,7 +128,7 @@ VIEWMAX = {"script": {"script": "Hello there", "word_count": 2, "estimated_secon
 class StructureTests(unittest.TestCase):
     def test_two_tabs_and_sidebar_folder_field(self):
         f = run_app(FakeSt())
-        self.assertEqual(f.tab_labels, ["Vugola AI Mode", "Viewmax Mode"])
+        self.assertEqual(f.tab_labels, ["🎬 Clip Repurposer Studio", "⚡ AI Generator Lab"])
         labels = [c[1][0] for c in f.names("text_input")]
         self.assertIn("Google Drive Folder ID", labels)
         self.assertIn("YouTube URL", labels)

@@ -1,5 +1,5 @@
 """
-launcher.py  -  double-click entry point for Clip Studio.
+launcher.py  -  double-click entry point for CinePulse AI.
 
 Starts the Streamlit app (frontend/app.py) on a free local port and opens it in
 the default browser once the server answers. Works from source
@@ -65,18 +65,18 @@ def writable_dir(preferred: Path) -> Path:
     except OSError:
         import tempfile
 
-        fallback = Path(tempfile.gettempdir()) / "ClipStudio"
+        fallback = Path(tempfile.gettempdir()) / "CinePulseAI"
         fallback.mkdir(parents=True, exist_ok=True)
         return fallback
 
 
 def redirect_stdio_if_needed() -> Optional[Path]:
     """A --noconsole exe starts with sys.stdout/sys.stderr = None, which makes
-    Streamlit and logging misbehave. Point them at clipstudio.log instead."""
+    Streamlit and logging misbehave. Point them at cinepulseai.log instead."""
     if sys.stdout is not None and sys.stderr is not None:
         return None
     base = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else resource_root()
-    log_path = writable_dir(base) / "clipstudio.log"
+    log_path = writable_dir(base) / "cinepulseai.log"
     stream = open(log_path, "a", buffering=1, encoding="utf-8", errors="replace")
     if sys.stdout is None:
         sys.stdout = stream
@@ -141,7 +141,7 @@ def open_browser_when_ready(port: int, timeout: float = STARTUP_TIMEOUT) -> thre
         if wait_until_ready(port, timeout):
             webbrowser.open(f"http://localhost:{port}")
         else:
-            print(f"Clip Studio did not start within {int(timeout)} seconds.", file=sys.stderr)
+            print(f"CinePulse AI did not start within {int(timeout)} seconds.", file=sys.stderr)
 
     thread = threading.Thread(target=_worker, name="open-browser", daemon=True)
     thread.start()
@@ -160,6 +160,13 @@ def build_streamlit_argv(app: Path, port: int) -> list:
         "--server.fileWatcherType", "none",  # no reload watcher in a packaged app
         "--browser.gatherUsageStats", "false",
         "--global.developmentMode", "false",  # required when frozen
+        # CinePulse AI dark theme (the injected CSS adds the glass look on top)
+        "--theme.base", "dark",
+        "--theme.primaryColor", "#8B5CF6",
+        "--theme.backgroundColor", "#0B0B14",
+        "--theme.secondaryBackgroundColor", "#14142A",
+        "--theme.textColor", "#ECEEF8",
+        "--client.toolbarMode", "minimal",
     ]
 
 
@@ -172,7 +179,7 @@ def main() -> int:
         print(exc, file=sys.stderr)
         return 1
 
-    if "--selftest" in sys.argv[1:]:  # ClipStudio.exe --selftest : check the build, then exit
+    if "--selftest" in sys.argv[1:]:  # CinePulseAI.exe --selftest : check the build, then exit
         import selftest
 
         return selftest.main(app)
@@ -188,7 +195,7 @@ def main() -> int:
         print("Streamlit is not installed. Run: pip install -r requirements.txt", file=sys.stderr)
         return 1
 
-    print(f"Starting Clip Studio on http://localhost:{port}  (close this window to stop)")
+    print(f"Starting CinePulse AI on http://localhost:{port}  (close this window to stop)")
     open_browser_when_ready(port)
     sys.argv = build_streamlit_argv(app, port)
     try:

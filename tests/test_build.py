@@ -127,7 +127,7 @@ class CommandTests(unittest.TestCase):
         for flag in ("--onedir", "--noconsole", "--noconfirm", "--clean"):
             self.assertIn(flag, a)
         self.assertNotIn("--onefile", a)
-        self.assertEqual(a[a.index("--name") + 1], "ClipStudio")
+        self.assertEqual(a[a.index("--name") + 1], "CinePulseAI")
         self.assertEqual(a[-1], str(ROOT / "launcher.py"))
 
     def test_explicit_collect_all(self):
@@ -159,7 +159,7 @@ class AssembleTests(unittest.TestCase):
     def build_dir(self, **proj):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
-        root, app = Path(d.name) / "proj", Path(d.name) / "dist" / "ClipStudio"
+        root, app = Path(d.name) / "proj", Path(d.name) / "dist" / "CinePulseAI"
         root.mkdir()
         make_project(root, **proj)
         return root, app
@@ -171,7 +171,7 @@ class AssembleTests(unittest.TestCase):
         self.assertTrue((app / "bin" / "ffmpeg.exe").is_file())
         self.assertTrue((app / "models" / "faster-whisper-base" / "model.bin").is_file())
         self.assertEqual(json.loads((app / "token.json").read_text()), GOOD_TOKEN)
-        self.assertIn("Quit Clip Studio", (app / "README.txt").read_text())
+        self.assertIn("Quit CinePulse AI", (app / "README.txt").read_text())
 
     def test_no_token_flag_leaves_token_out(self):
         root, app = self.build_dir(token=GOOD_TOKEN)
@@ -265,10 +265,10 @@ class MainTests(unittest.TestCase):
 class FrozenRuntimeTests(unittest.TestCase):
     def test_launcher_redirects_none_stdio_to_log(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.object(sys, "frozen", True, create=True), mock.patch.object(
-            sys, "executable", str(Path(d) / "ClipStudio.exe")
+            sys, "executable", str(Path(d) / "CinePulseAI.exe")
         ), mock.patch.object(sys, "stdout", None), mock.patch.object(sys, "stderr", None):
             log = launcher.redirect_stdio_if_needed()
-            self.assertEqual(log, Path(d) / "clipstudio.log")
+            self.assertEqual(log, Path(d) / "cinepulseai.log")
             print("hello from a no-console exe")
             sys.stderr.write("an error\n")
             sys.stdout.flush()
@@ -283,13 +283,13 @@ class FrozenRuntimeTests(unittest.TestCase):
     def test_writable_dir_falls_back_when_read_only(self):
         with mock.patch.object(Path, "mkdir", side_effect=[PermissionError(), None]):
             got = launcher.writable_dir(Path("/proc/nope"))
-        self.assertIn("ClipStudio", str(got))
+        self.assertIn("CinePulseAI", str(got))
 
     def test_uploader_looks_next_to_exe_when_frozen(self):
         import importlib
         import uploader
         with tempfile.TemporaryDirectory() as d, mock.patch.object(sys, "frozen", True, create=True), mock.patch.object(
-            sys, "executable", str(Path(d) / "ClipStudio.exe")
+            sys, "executable", str(Path(d) / "CinePulseAI.exe")
         ), mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("GOOGLE_TOKEN_FILE", None)
             frozen = importlib.reload(uploader)
@@ -324,10 +324,10 @@ class FrozenRuntimeTests(unittest.TestCase):
     def test_quit_button_only_when_frozen(self):
         from tests.test_app_logic import FakeSt, run_app
         plain = run_app(FakeSt())
-        self.assertNotIn("Quit Clip Studio", [c[1][0] for c in plain.names("button")])
+        self.assertNotIn("Quit CinePulse AI", [c[1][0] for c in plain.names("button")])
         with mock.patch.object(sys, "frozen", True, create=True):
             frozen = run_app(FakeSt())
-        self.assertIn("Quit Clip Studio", [c[1][0] for c in frozen.names("button")])
+        self.assertIn("Quit CinePulse AI", [c[1][0] for c in frozen.names("button")])
         with mock.patch.object(sys, "frozen", True, create=True), mock.patch("os._exit") as ex:
             run_app(FakeSt(clicked=["quit_app"]))
         ex.assert_called_once_with(0)
@@ -335,7 +335,7 @@ class FrozenRuntimeTests(unittest.TestCase):
     def test_frozen_output_dir_is_next_to_exe(self):
         from tests.test_app_logic import FakeSt
         with tempfile.TemporaryDirectory() as d, mock.patch.object(sys, "frozen", True, create=True), mock.patch.object(
-            sys, "executable", str(Path(d) / "ClipStudio.exe")
+            sys, "executable", str(Path(d) / "CinePulseAI.exe")
         ):
             with mock.patch.dict(sys.modules, {"streamlit": FakeSt()}):
                 ns = runpy.run_path(str(ROOT / "frontend" / "app.py"), run_name="not_main")

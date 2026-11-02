@@ -1,8 +1,8 @@
 """
-build_exe.py  -  build the Clip Studio Windows distribution with PyInstaller.
+build_exe.py  -  build the CinePulse AI Windows distribution with PyInstaller.
 
     python build_exe.py --dry-run     # scan + show the PyInstaller arguments, build nothing
-    python build_exe.py               # build dist/ClipStudio/ and ClipStudio-Final-Executable.zip
+    python build_exe.py               # build dist/CinePulseAI/ and CinePulseAI-Final-Executable.zip
     python build_exe.py --ci          # same, for an unattended CI machine
 
 Must run on WINDOWS (PyInstaller cannot cross-compile). No manual setup is
@@ -37,7 +37,7 @@ from typing import List, Optional
 import build  # shared constants, preflight scan and helpers
 
 ROOT = Path(__file__).resolve().parent
-ZIP_NAME = "ClipStudio-Final-Executable.zip"
+ZIP_NAME = "CinePulseAI-Final-Executable.zip"
 
 FFMPEG_URLS = [
     "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
@@ -54,7 +54,7 @@ BLAZEFACE_URL = (
 # --------------------------------------------------------------------------- #
 def download(url: str, dest: Path, timeout: int = 120) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    req = urllib.request.Request(url, headers={"User-Agent": "ClipStudio-build"})
+    req = urllib.request.Request(url, headers={"User-Agent": "CinePulseAI-build"})
     with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as out:
         shutil.copyfileobj(resp, out)
 
@@ -158,15 +158,15 @@ def finalize(app_dir: Path, root: Path = ROOT, include_token: bool = True) -> Li
         shutil.copy2(token, app_dir / build.TOKEN_REL)
         copied.append("token.json")
     (app_dir / "README.txt").write_text(
-        "Clip Studio\n===========\n\n"
+        "CinePulse AI\n===========\n\n"
         f"Double-click {build.exe_name()}. Your browser opens the app at http://localhost:8501.\n"
-        "There is no console window: use 'Quit Clip Studio' in the sidebar to stop it.\n"
-        "If nothing opens, read clipstudio.log in this folder.\n\n"
+        "There is no console window: use 'Quit CinePulse AI' in the sidebar to stop it.\n"
+        "If nothing opens, read cinepulseai.log in this folder.\n\n"
         "Works offline: transcription, highlight scoring, face-tracked cropping, merging.\n"
         "Needs internet: YouTube downloads, edge-tts voices, Google Drive upload.\n\n"
         "GOOGLE DRIVE (optional)\n"
         "  The app runs fine without it - clips are simply saved in the 'outputs' folder here.\n"
-        "  token.json       -> put it in THIS folder (next to ClipStudio.exe) for uploads with no sign-in.\n"
+        "  token.json       -> put it in THIS folder (next to CinePulseAI.exe) for uploads with no sign-in.\n"
         "  credentials.json -> alternatively put your OAuth client file here; the first upload\n"
         "                      then opens a Google sign-in page and creates token.json.\n"
         "  Then type your Drive Folder ID in the sidebar.\n"
@@ -199,7 +199,7 @@ def make_zip(app_dir: Path, zip_path: Path) -> Path:
 
 # --------------------------------------------------------------------------- #
 def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="Build the Clip Studio distribution")
+    ap = argparse.ArgumentParser(description="Build the CinePulse AI distribution")
     ap.add_argument("--dry-run", action="store_true", help="scan and print the arguments only")
     ap.add_argument("--ci", action="store_true", help="unattended build (implies downloads allowed)")
     ap.add_argument("--no-token", action="store_true", help="do not bundle token.json")

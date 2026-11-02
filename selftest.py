@@ -1,10 +1,10 @@
 """
-selftest.py  -  runs INSIDE the packaged exe:   ClipStudio.exe --selftest
+selftest.py  -  runs INSIDE the packaged exe:   CinePulseAI.exe --selftest
 
 Proves the build actually works, not just that a web server starts: every
 bundled library imports, ffmpeg runs, the face model and the Whisper model
 load, a real clip is cropped and encoded, and the Streamlit page renders.
-Output goes to clipstudio.log (the exe has no console); exit code 0 = all good.
+Output goes to cinepulseai.log (the exe has no console); exit code 0 = all good.
 Online-only features (edge-tts) are reported as warnings, never failures.
 """
 
@@ -133,7 +133,7 @@ def check_app_page(app_path: Optional[Path]) -> str:
     if at.exception:
         raise RuntimeError("; ".join(str(e.value) for e in at.exception))
     tabs = [t.label for t in at.tabs]
-    if tabs[:2] != ["Vugola AI Mode", "Viewmax Mode"]:
+    if tabs[:2] != ["🎬 Clip Repurposer Studio", "⚡ AI Generator Lab"]:
         raise RuntimeError(f"unexpected tabs: {tabs}")
     return f"page rendered with tabs {tabs[:2]}"
 
@@ -177,7 +177,7 @@ def run_all(app_path: Optional[Path] = None, log: Callable[[str], None] = print)
 
 
 def main(app_path: Optional[Path] = None) -> int:
-    print("Clip Studio self-test")
+    print("CinePulse AI self-test")
     results = run_all(app_path)
     failed = [r for r in results if r[1] == "fail"]
     print(f"\n{len(results) - len(failed)}/{len(results)} checks passed" + (" - SELFTEST FAILED" if failed else " - SELFTEST OK"))

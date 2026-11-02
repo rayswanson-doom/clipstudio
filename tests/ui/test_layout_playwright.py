@@ -75,21 +75,65 @@ class LayoutTests(unittest.TestCase):
         cls.pw.stop()
         cls.server.terminate()
 
-    def open(self, width=1280, height=800):
+    def open(self, width=1280, height=800, demo=False):
         page = self.browser.new_page(viewport={"width": width, "height": height})
-        page.goto(URL)
-        page.get_by_role("tab", name="Vugola AI Mode").wait_for(timeout=30000)
+        page.goto(URL + ("/?demo=1" if demo else ""))
+        page.get_by_role("tab", name="🎬 Clip Repurposer Studio").wait_for(timeout=30000)
         return page
 
     def assert_no_horizontal_overflow(self, page):
         overflow = page.evaluate(
             "() => document.scrollingElement.scrollWidth - document.scrollingElement.clientWidth")
         self.assertLessEqual(overflow, 1, f"page scrolls horizontally by {overflow}px")
+        main = page.evaluate(
+            """() => { const m = document.querySelector('[data-testid="stMain"]');
+                       return m ? m.scrollWidth - m.clientWidth : 0; }""")
+        self.assertLessEqual(main, 1, f"main area scrolls horizontally by {main}px")
+
+    def test_branding_and_theme(self):
+        page = self.open()
+        self.assertEqual(page.title(), "CinePulse AI")
+        self.assertTrue(page.get_by_role("heading", name="CinePulse AI").first.is_visible())
+        for old in ("Vugola", "Viewmax", "Clip Studio"):
+            self.assertEqual(page.get_by_text(old).count(), 0, old)
+        bg = page.evaluate("() => getComputedStyle(document.querySelector('.stApp')).backgroundColor")
+        self.assertNotEqual(bg, "rgb(255, 255, 255)")  # dark theme, not default white
+        blur = page.evaluate(
+            """() => getComputedStyle(document.querySelector('[data-testid="stSidebar"]')).backdropFilter""")
+        self.assertIn("blur", blur)
+        page.screenshot(path=str(SHOTS / "desktop_home.png"), full_page=True)
+        page.close()
+
+    def test_demo_cards_and_badges(self):
+        for w, h, name in ((1280, 800, "desktop"), (390, 844, "phone")):
+            page = self.open(w, h, demo=True)
+            page.get_by_text("Top score").first.wait_for(timeout=15000)
+            self.assertTrue(page.get_by_text("Clips created").first.is_visible())
+            self.assertTrue(page.locator(".cp-badge.score").first.is_visible())
+            self.assertGreaterEqual(page.locator(".cp-quote").count(), 2)
+            self.assert_no_horizontal_overflow(page)
+            page.screenshot(path=str(SHOTS / f"{name}_demo_clips.png"), full_page=True)
+            page.get_by_role("tab", name="⚡ AI Generator Lab").click()
+            page.get_by_text("Est. length").first.wait_for(timeout=10000)
+            self.assert_no_horizontal_overflow(page)
+            page.screenshot(path=str(SHOTS / f"{name}_demo_lab.png"), full_page=True)
+            page.close()
+
+    def test_sidebar_collapses_and_reopens(self):
+        page = self.open()
+        sidebar = page.locator('[data-testid="stSidebar"]')
+        self.assertTrue(sidebar.get_by_label("Google Drive Folder ID").is_visible())
+        page.locator('[data-testid="stSidebarCollapseButton"] button, [data-testid="stSidebarCollapseButton"]').first.click()
+        page.get_by_label("Google Drive Folder ID").wait_for(state="hidden", timeout=10000)
+        page.screenshot(path=str(SHOTS / "desktop_sidebar_collapsed.png"), full_page=True)
+        page.locator('[data-testid="stExpandSidebarButton"], [data-testid="collapsedControl"]').first.click()
+        page.get_by_label("Google Drive Folder ID").wait_for(state="visible", timeout=10000)
+        page.close()
 
     def test_two_tabs_and_sidebar(self):
         page = self.open()
-        self.assertTrue(page.get_by_role("tab", name="Vugola AI Mode").is_visible())
-        self.assertTrue(page.get_by_role("tab", name="Viewmax Mode").is_visible())
+        self.assertTrue(page.get_by_role("tab", name="🎬 Clip Repurposer Studio").is_visible())
+        self.assertTrue(page.get_by_role("tab", name="⚡ AI Generator Lab").is_visible())
         sidebar = page.locator('[data-testid="stSidebar"]')
         self.assertTrue(sidebar.get_by_label("Google Drive Folder ID").is_visible())
         page.screenshot(path=str(SHOTS / "desktop_vugola.png"), full_page=True)
@@ -104,7 +148,7 @@ class LayoutTests(unittest.TestCase):
 
     def test_viewmax_controls(self):
         page = self.open()
-        page.get_by_role("tab", name="Viewmax Mode").click()
+        page.get_by_role("tab", name="⚡ AI Generator Lab").click()
         self.assertTrue(page.get_by_label("What should the video be about?").is_visible())
         self.assertTrue(page.get_by_role("button", name="Generate video").is_visible())
         page.screenshot(path=str(SHOTS / "desktop_viewmax.png"), full_page=True)
@@ -114,7 +158,7 @@ class LayoutTests(unittest.TestCase):
         page = self.open()
         page.get_by_role("button", name="Generate viral clips").click()
         page.get_by_text("Paste a YouTube URL or upload a video first.").wait_for(timeout=10000)
-        page.get_by_role("tab", name="Viewmax Mode").click()
+        page.get_by_role("tab", name="⚡ AI Generator Lab").click()
         page.get_by_role("button", name="Generate video").click()
         page.get_by_text("Enter a prompt first.").wait_for(timeout=10000)
         page.close()
@@ -123,7 +167,7 @@ class LayoutTests(unittest.TestCase):
         for w, h, name in ((1280, 800, "desktop"), (390, 844, "phone")):
             page = self.open(w, h)
             self.assert_no_horizontal_overflow(page)
-            page.get_by_role("tab", name="Viewmax Mode").click()
+            page.get_by_role("tab", name="⚡ AI Generator Lab").click()
             self.assert_no_horizontal_overflow(page)
             page.screenshot(path=str(SHOTS / f"{name}_viewmax.png"), full_page=True)
             page.close()

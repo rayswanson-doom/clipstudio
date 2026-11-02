@@ -1,0 +1,36 @@
+name: UI check
+
+# Run by hand: Actions tab -> "UI check" -> Run workflow.
+# Starts the real Streamlit app, drives it with Chromium (desktop + phone widths),
+# runs the unit tests, and uploads screenshots of every view.
+on:
+  workflow_dispatch:
+  push:
+    paths: ["frontend/**", "tests/ui/**", ".github/workflows/ui-check.yml"]
+
+jobs:
+  ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt playwright pytest
+          python -m playwright install --with-deps chromium
+      - name: Layout tests (real browser)
+        run: python -m unittest -v tests.ui.test_layout_playwright
+      - name: Unit tests
+        run: python -m unittest tests.test_app_logic tests.test_launcher tests.test_build tests.test_build_exe tests.test_pipeline tests.test_offline_audit tests.test_scorer
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-screenshots
+          path: tests/ui/screenshots
+          if-no-files-found: warn
