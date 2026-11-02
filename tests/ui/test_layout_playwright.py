@@ -96,7 +96,7 @@ class LayoutTests(unittest.TestCase):
         # Streamlit paints progressively: wait for the real controls, not just the tab strip
         page.get_by_label("YouTube URL").wait_for(state="visible", timeout=30000)
         if width > 640:
-            page.get_by_label("Google Drive Folder ID").wait_for(state="visible", timeout=30000)
+            page.get_by_label("Google Drive Folder ID", exact=True).wait_for(state="visible", timeout=30000)
         return page
 
     def assert_no_horizontal_overflow(self, page):
@@ -140,12 +140,12 @@ class LayoutTests(unittest.TestCase):
     def test_sidebar_collapses_and_reopens(self):
         page = self.open()
         sidebar = page.locator('[data-testid="stSidebar"]')
-        self.assertTrue(sidebar.get_by_label("Google Drive Folder ID").is_visible())
+        self.assertTrue(sidebar.get_by_label("Google Drive Folder ID", exact=True).is_visible())
         page.locator('[data-testid="stSidebarCollapseButton"] button, [data-testid="stSidebarCollapseButton"]').first.click()
-        page.get_by_label("Google Drive Folder ID").wait_for(state="hidden", timeout=10000)
+        page.get_by_label("Google Drive Folder ID", exact=True).wait_for(state="hidden", timeout=10000)
         page.screenshot(path=str(SHOTS / "desktop_sidebar_collapsed.png"), full_page=True)
         page.locator('[data-testid="stExpandSidebarButton"], [data-testid="collapsedControl"]').first.click()
-        page.get_by_label("Google Drive Folder ID").wait_for(state="visible", timeout=10000)
+        page.get_by_label("Google Drive Folder ID", exact=True).wait_for(state="visible", timeout=10000)
         page.close()
 
     def test_two_tabs_and_sidebar(self):
@@ -153,7 +153,7 @@ class LayoutTests(unittest.TestCase):
         self.assertTrue(page.get_by_role("tab", name="🎬 Clip Repurposer Studio").is_visible())
         self.assertTrue(page.get_by_role("tab", name="⚡ AI Generator Lab").is_visible())
         sidebar = page.locator('[data-testid="stSidebar"]')
-        self.assertTrue(sidebar.get_by_label("Google Drive Folder ID").is_visible())
+        self.assertTrue(sidebar.get_by_label("Google Drive Folder ID", exact=True).is_visible())
         page.screenshot(path=str(SHOTS / "desktop_vugola.png"), full_page=True)
         page.close()
 
