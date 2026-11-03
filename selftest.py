@@ -25,7 +25,7 @@ MODULES = [
     "streamlit", "cv2", "numpy", "mediapipe", "mediapipe.tasks.python.vision",
     "faster_whisper", "ctranslate2", "googleapiclient.discovery", "googleapiclient.http",
     "google_auth_oauthlib.flow", "google.oauth2.credentials", "yt_dlp", "edge_tts",
-    "pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine",
+    "pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine", "avatar_sync",
 ]
 
 
@@ -124,6 +124,27 @@ def check_clip_pipeline() -> str:
     return f"{res['frames']} frames cropped to 9:16, {size // 1024} KB encoded"
 
 
+def check_avatar() -> str:
+    """Render a 2 s talking avatar with the real BlazeFace model, ffmpeg and OpenCV."""
+    import cv2
+    import numpy as np
+    import avatar_sync
+    import video_engine
+
+    with tempfile.TemporaryDirectory() as d:
+        img, wav, out = (os.path.join(d, n) for n in ("a.png", "a.wav", "a.mp4"))
+        pic = np.full((640, 480, 3), (120, 150, 190), np.uint8)
+        cv2.ellipse(pic, (240, 300), (140, 190), 0, 0, 360, (150, 190, 235), -1)
+        cv2.imwrite(img, pic)
+        subprocess.run([video_engine.find_ffmpeg(), "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+                        "sine=frequency=200:duration=2", wav], check=True, timeout=60, creationflags=_flags())
+        res = avatar_sync.create_avatar_video(img, wav, out, size=(360, 640))
+        size = os.path.getsize(out)
+        if size < 1000 or res["frames"] < 40:
+            raise RuntimeError(f"avatar video is empty or short: {res}")
+    return f"{res['frames']} frames, {res['mode']} animation, {size // 1024} KB"
+
+
 def check_app_page(app_path: Optional[Path]) -> str:
     if app_path is None or not Path(app_path).is_file():
         raise RuntimeError(f"app file not found: {app_path}")
@@ -159,6 +180,7 @@ def run_all(app_path: Optional[Path] = None, log: Callable[[str], None] = print)
         ("face model", "fail", check_face_model),
         ("whisper model", "fail", check_whisper),
         ("clip pipeline", "fail", check_clip_pipeline),
+        ("avatar lip-sync", "fail", check_avatar),
         ("app page", "fail", lambda: check_app_page(app_path)),
         ("edge-tts (online)", "warn", check_tts_online),
     ]

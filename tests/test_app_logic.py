@@ -75,6 +75,7 @@ class FakeSt:
         return self.inputs.get(key, value)
 
     def checkbox(self, label, value=False, key=None, **k):
+        self._log("checkbox", label, key=key)
         return self.inputs.get(key, value)
 
     def selectbox(self, label, options, index=0, key=None, **k):
@@ -219,6 +220,41 @@ class ViewmaxTabTests(unittest.TestCase):
         with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
             run_app(FakeSt({"viewmax_prompt": "p", "viewmax_bg": FakeUpload()}, clicked=["viewmax_run"]))
         self.assertTrue(rv.call_args[1]["background_video"].endswith("my clip.mp4"))
+
+    def test_avatar_controls_exist(self):
+        f = run_app(FakeSt())
+        boxes = [c for c in f.names("checkbox") if c[2]["key"] == "viewmax_avatar_on"]
+        self.assertEqual(boxes[0][1][0], "Enable AI Avatar Lip-Sync Commentary")
+        up = [c for c in f.names("file_uploader") if c[2]["key"] == "viewmax_avatar"]
+        self.assertEqual(up[0][2]["type"], ["jpg", "jpeg", "png"])
+
+    def test_avatar_off_sends_no_avatar_args(self):
+        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
+            run_app(FakeSt({"viewmax_prompt": "p", "viewmax_avatar": FakeUpload()}, clicked=["viewmax_run"]))
+        self.assertNotIn("avatar_image", rv.call_args[1])
+        self.assertNotIn("avatar_enabled", rv.call_args[1])
+
+    def test_avatar_on_forwards_image(self):
+        up = FakeUpload()
+        up.name = "me.png"
+        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
+            run_app(FakeSt({"viewmax_prompt": "p", "viewmax_avatar_on": True, "viewmax_avatar": up},
+                           clicked=["viewmax_run"]))
+        kw = rv.call_args[1]
+        self.assertTrue(kw["avatar_enabled"])
+        self.assertTrue(kw["avatar_image"].endswith("me.png"))
+
+    def test_avatar_on_without_picture_warns(self):
+        with mock.patch.object(pipeline, "run_viewmax_pipeline") as rv:
+            f = run_app(FakeSt({"viewmax_prompt": "p", "viewmax_avatar_on": True}, clicked=["viewmax_run"]))
+        rv.assert_not_called()
+        self.assertTrue(any("avatar" in c[1][0].lower() for c in f.names("warning")))
+
+    def test_avatar_result_badge(self):
+        res = {**VIEWMAX, "avatar": {"mode": "pulse"}}
+        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=res):
+            f = run_app(FakeSt({"viewmax_prompt": "p"}, clicked=["viewmax_run"]))
+        self.assertTrue(any("Avatar animation" in str(c) for c in f.names("markdown")))
 
     def test_empty_prompt_warns(self):
         with mock.patch.object(pipeline, "run_viewmax_pipeline") as rv:

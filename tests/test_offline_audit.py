@@ -29,7 +29,7 @@ class ImportTests(unittest.TestCase):
             "'edge_tts','streamlit'):\n"
             "    sys.modules[m] = None\n"
             f"sys.path.insert(0, {str(ROOT / 'backend')!r})\n"
-            "import scorer, uploader, transcriber, tts_engine, video_engine, pipeline\n"
+            "import scorer, uploader, transcriber, tts_engine, video_engine, avatar_sync, pipeline\n"
             "print('imports-ok')\n"
         )
         out = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=120)

@@ -44,7 +44,7 @@ from typing import List, Optional
 ROOT = Path(__file__).resolve().parent
 APP_NAME = "CinePulseAI"
 
-BACKEND_MODULES = ["pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine"]
+BACKEND_MODULES = ["pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine", "avatar_sync"]
 REQUIRED_SOURCES = [
     "launcher.py", "selftest.py", "frontend/app.py",
     *[f"backend/{m}.py" for m in BACKEND_MODULES],

@@ -150,6 +150,23 @@ class LayoutTests(unittest.TestCase):
             "() => document.querySelector('[data-testid=\"stSidebar\"]').dataset.collapsed === 'false'", timeout=10000)
         page.close()
 
+    def test_avatar_checkbox_enables_uploader_and_phone_fits(self):
+        for w, h, name in ((1280, 800, "desktop"), (390, 844, "phone")):
+            page = self.open(w, h)
+            page.get_by_role("tab", name="⚡ AI Generator Lab").click()
+            box = page.get_by_text("Enable AI Avatar Lip-Sync Commentary")
+            box.wait_for(state="visible", timeout=15000)
+            drop = page.locator('[data-testid="stFileUploaderDropzone"]').nth(2)  # avatar picture
+            self.assertTrue(drop.locator("input[type=file]").is_disabled())
+            box.click()
+            page.wait_for_function(
+                """() => !document.querySelectorAll('[data-testid="stFileUploaderDropzone"] input[type=file]')[2].disabled""",
+                timeout=10000)
+            self.assert_no_horizontal_overflow(page)
+            box.scroll_into_view_if_needed()
+            page.screenshot(path=str(SHOTS / f"{name}_avatar.png"), full_page=True)
+            page.close()
+
     def test_phone_starts_with_sidebar_closed(self):
         page = self.open(390, 844)
         self.assertEqual(page.locator('[data-testid="stSidebar"]').get_attribute("data-collapsed"), "true")

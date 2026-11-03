@@ -55,6 +55,7 @@ def _output_dir() -> Path:
 OUTPUT_DIR = _output_dir()
 UPLOAD_DIR = Path(tempfile.gettempdir()) / "cinepulse_uploads"
 VIDEO_TYPES = ["mp4", "mov", "mkv", "webm", "avi"]
+AVATAR_TYPES = ["jpg", "jpeg", "png"]
 VOICES = [
     "en-US-AriaNeural", "en-US-GuyNeural", "en-US-JennyNeural",
     "en-GB-SoniaNeural", "en-GB-RyanNeural", "en-AU-NatashaNeural", "en-IN-NeerjaNeural",
@@ -275,6 +276,7 @@ DEMO_LAB = {
                          "Second, make it easy. Follow for more and share this with a friend.",
                "word_count": 31, "estimated_seconds": 12.4, "topic": "a morning routine"},
     "audio_path": None, "video_path": None, "drive_link": "https://drive.google.com/", "warnings": [],
+    "avatar": {"mode": "mouth-warp", "face_found": True, "used_word_timestamps": True, "layout": "full"},
 }
 
 
@@ -418,7 +420,7 @@ def render_clip_tab(folder_id: str) -> None:
 def render_lab_tab(folder_id: str) -> None:
     section_header("AI Generator Lab",
                    "Describe a video. Get a script, a natural voiceover and a finished vertical video.")
-    st.markdown(steps_html(["Prompt", "Script", "Voiceover", "Video merge", "Drive upload"]),
+    st.markdown(steps_html(["Prompt", "Script", "Voiceover", "Avatar / video merge", "Drive upload"]),
                 unsafe_allow_html=True)
 
     prompt = st.text_area(
@@ -431,16 +433,37 @@ def render_lab_tab(folder_id: str) -> None:
     )
     voice = st.selectbox("Voice", VOICES, index=0, key="viewmax_voice")
 
+    with st.container(border=True):
+        st.markdown('<div class="cp-clip-head"><span class="cp-rank">AI Avatar</span>'
+                    + badge("runs on CPU", "ok") + badge("no GPU needed", "time") + '</div>',
+                    unsafe_allow_html=True)
+        avatar_on = st.checkbox("Enable AI Avatar Lip-Sync Commentary", value=False, key="viewmax_avatar_on",
+                                help="Your avatar picture talks in time with the voiceover.")
+        avatar_file = st.file_uploader(
+            "Avatar picture (.jpg or .png) - a clear, front-facing face works best",
+            type=AVATAR_TYPES, key="viewmax_avatar", disabled=not avatar_on,
+        )
+        if avatar_on and avatar_file is not None:
+            st.image(avatar_file, width=140, caption="Your avatar")
+        st.caption("The mouth follows the voice and closes between words. If no face is found, "
+                   "the whole picture does a gentle talking pulse instead. If you also add a "
+                   "background video, the avatar appears as a card over it.")
+
     if st.button("Generate video", type="primary", key="viewmax_run"):
         if not prompt.strip():
             st.warning("Enter a prompt first.")
+        elif avatar_on and avatar_file is None:
+            st.warning("Upload an avatar picture to use AI Avatar Lip-Sync.")
         else:
             callback, bar = make_progress()
             try:
                 bg_path = save_upload(background) if background is not None else None
+                extra = {}
+                if avatar_on and avatar_file is not None:
+                    extra = {"avatar_image": save_upload(avatar_file), "avatar_enabled": True}
                 st.session_state["viewmax_result"] = pipeline.run_viewmax_pipeline(
                     prompt, folder_id, background_video=bg_path, voice=voice,
-                    output_dir=str(OUTPUT_DIR), progress=callback,
+                    output_dir=str(OUTPUT_DIR), progress=callback, **extra,
                 )
             except Exception as exc:
                 st.session_state.pop("viewmax_result", None)
@@ -451,9 +474,12 @@ def render_lab_tab(folder_id: str) -> None:
     if result:
         show_warnings(result.get("warnings"))
         script = result["script"]
-        st.markdown(stat_tiles([(script["word_count"], "Words"), (f"{script['estimated_seconds']}s", "Est. length"),
-                                ("Yes" if result.get("drive_link") else "No", "Backed up to Drive")]),
-                    unsafe_allow_html=True)
+        avatar = result.get("avatar")
+        tiles = [(script["word_count"], "Words"), (f"{script['estimated_seconds']}s", "Est. length"),
+                 ("Yes" if result.get("drive_link") else "No", "Backed up to Drive")]
+        if avatar:
+            tiles.append(("Mouth sync" if avatar["mode"] == "mouth-warp" else "Pulse", "Avatar animation"))
+        st.markdown(stat_tiles(tiles), unsafe_allow_html=True)
         with st.container(border=True):
             st.markdown('<div class="cp-clip-head"><span class="cp-rank">Script</span></div>', unsafe_allow_html=True)
             st.markdown(f'<div class="cp-quote">{_e(script["script"])}</div>', unsafe_allow_html=True)

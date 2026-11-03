@@ -22,12 +22,14 @@ from pathlib import Path
 from typing import Callable, Optional
 
 try:  # package import (backend.pipeline) or plain module (pipeline)
+    from .avatar_sync import create_avatar_video, load_avatar
     from .scorer import find_viral_clips, generate_script
     from .transcriber import transcribe_audio
     from .tts_engine import DEFAULT_VOICE, generate_voiceover
     from .uploader import download_media, drive_status, upload_to_google_drive
     from .video_engine import create_vertical_short, merge_audio_with_video
 except ImportError:  # pragma: no cover
+    from avatar_sync import create_avatar_video, load_avatar
     from scorer import find_viral_clips, generate_script
     from transcriber import transcribe_audio
     from tts_engine import DEFAULT_VOICE, generate_voiceover
@@ -162,13 +164,22 @@ def run_viewmax_pipeline(
     output_dir: str = "outputs",
     progress: Optional[ProgressCb] = None,
     ffmpeg_path: Optional[str] = None,
+    avatar_image: Optional[str] = None,
+    avatar_enabled: bool = False,
 ) -> dict:
     """Prompt -> script -> voiceover -> merged vertical video -> Drive.
 
-    Returns {"script": {...}, "audio_path", "video_path", "drive_link", "warnings"}.
+    With avatar_enabled, the video shows `avatar_image` talking in sync with the
+    voiceover (backend/avatar_sync.py) instead of a plain audio+background merge.
+
+    Returns {"script": {...}, "audio_path", "video_path", "drive_link", "avatar", "warnings"}.
     """
     if not prompt or not prompt.strip():
         raise ValueError("Please enter a prompt first.")
+    if avatar_enabled:
+        if not avatar_image:
+            raise ValueError("Upload an avatar image (.jpg or .png) to use AI Avatar Lip-Sync.")
+        load_avatar(avatar_image)  # fail fast on a wrong/unreadable file, before any voiceover work
     warnings = []
     folder_id = _usable_folder(folder_id, warnings)
     out_dir = Path(output_dir)
@@ -182,11 +193,27 @@ def run_viewmax_pipeline(
     audio_path = out_dir / f"voice_{stamp}.mp3"
     audio_path = _run_async(generate_voiceover(script["script"], str(audio_path), voice=voice))
 
-    _emit(progress, "Merging audio and video", 0.60)
-    video_path = merge_audio_with_video(
-        audio_path, str(out_dir / f"viewmax_{_safe_name(script['topic'], 30)}_{stamp}.mp4"),
-        background_video=background_video, ffmpeg_path=ffmpeg_path,
-    )
+    out_name = str(out_dir / f"viewmax_{_safe_name(script['topic'], 30)}_{stamp}.mp4")
+    video_path, avatar_info = None, None
+    if avatar_enabled:
+        _emit(progress, "Animating the avatar (lip-sync)", 0.50)
+        try:
+            avatar_info = create_avatar_video(
+                avatar_image, audio_path, out_name, auto_words=True, background_video=background_video,
+                ffmpeg_path=ffmpeg_path,
+                progress=lambda f: _emit(progress, "Animating the avatar (lip-sync)", 0.50 + 0.33 * f),
+            )
+            video_path = avatar_info["output_path"]
+            warnings.extend(avatar_info["warnings"])
+        except Exception as exc:  # still hand back a video rather than nothing
+            logger.warning("avatar lip-sync failed: %s", exc)
+            warnings.append(f"Avatar lip-sync failed ({exc}); made a plain video instead.")
+            avatar_info = None
+    if video_path is None:
+        _emit(progress, "Merging audio and video", 0.60)
+        video_path = merge_audio_with_video(
+            audio_path, out_name, background_video=background_video, ffmpeg_path=ffmpeg_path,
+        )
 
     drive_link = None
     if folder_id:
@@ -196,5 +223,5 @@ def run_viewmax_pipeline(
     _emit(progress, "Done", 1.0)
     return {
         "script": script, "audio_path": audio_path, "video_path": video_path,
-        "drive_link": drive_link, "warnings": warnings,
+        "drive_link": drive_link, "avatar": avatar_info, "warnings": warnings,
     }

@@ -105,3 +105,16 @@ may fail on Windows - they do not affect the build.)
 - **YouTube downloads** depend on yt-dlp staying current; rebuild occasionally to get the newest one.
 - The two ffmpeg *source code* archives you sent earlier cannot be used; the build downloads a ready-made
   Windows ffmpeg instead.
+
+
+## AI Avatar lip-sync (AI Generator Lab)
+
+In the **AI Generator Lab** tab, tick **Enable AI Avatar Lip-Sync Commentary** and upload a `.jpg`/`.png`
+picture of your avatar. The generated video then shows that picture talking in time with the voiceover.
+
+- It runs on the CPU only (no GPU, no API key). A 30-second video takes roughly 30-60 seconds on a laptop.
+- A clear, front-facing face (photo or flat illustration) gives real mouth movement: the jaw opens and closes
+  with the voice and shuts between words (word timing comes from the bundled Whisper model).
+- If no face is found, the whole picture does a gentle talking pulse instead, and you are told so.
+- If you also add a background video, the avatar appears as a rounded card over it.
+- This is 2-D image warping, not a neural talking-head model, so the motion is stylised and subtle.
