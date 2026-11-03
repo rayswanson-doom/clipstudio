@@ -111,7 +111,7 @@ class LayoutTests(unittest.TestCase):
     def test_branding_and_theme(self):
         page = self.open()
         self.assertEqual(page.title(), "CinePulse AI")
-        self.assertTrue(page.get_by_role("heading", name="CinePulse AI").first.is_visible())
+        page.get_by_role("heading", name="CinePulse AI").first.wait_for(state="visible", timeout=15000)
         for old in ("Vugola", "Viewmax", "Clip Studio"):
             self.assertEqual(page.get_by_text(old).count(), 0, old)
         bg = page.evaluate("() => getComputedStyle(document.querySelector('.stApp')).backgroundColor")
@@ -126,8 +126,8 @@ class LayoutTests(unittest.TestCase):
         for w, h, name in ((1280, 800, "desktop"), (390, 844, "phone")):
             page = self.open(w, h, demo=True)
             page.get_by_text("Top score").first.wait_for(timeout=15000)
-            self.assertTrue(page.get_by_text("Clips created").first.is_visible())
-            self.assertTrue(page.locator(".cp-badge.score").first.is_visible())
+            page.get_by_text("Clips created").first.wait_for(state="visible", timeout=15000)
+            page.locator(".cp-badge.score").first.wait_for(state="visible", timeout=15000)
             self.assertGreaterEqual(page.locator(".cp-quote").count(), 2)
             self.assert_no_horizontal_overflow(page)
             page.screenshot(path=str(SHOTS / f"{name}_demo_clips.png"), full_page=True)
