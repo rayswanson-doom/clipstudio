@@ -1,0 +1,29 @@
+name: OCR probe
+# Run by hand. Tries PaddleOCR and RapidOCR next to our real dependency set on Windows.
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install our dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt
+      - name: Install PaddleOCR (paddlepaddle + paddleocr)
+        continue-on-error: true
+        run: pip install paddlepaddle paddleocr
+      - name: Dependency conflicts after PaddleOCR
+        continue-on-error: true
+        run: pip check
+      - name: Install RapidOCR
+        continue-on-error: true
+        run: pip install rapidocr-onnxruntime
+      - name: Probe
+        continue-on-error: true
+        run: python tools/ocr_probe.py
