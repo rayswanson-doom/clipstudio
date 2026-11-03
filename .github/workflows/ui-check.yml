@@ -27,10 +27,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-build.txt playwright pytest
           python -m playwright install --with-deps chromium
+          sudo apt-get install -y ffmpeg   # the video, OCR and visual-cue tests need a real ffmpeg
       - name: Layout tests (real browser)
         run: python -m unittest -v tests.ui.test_layout_playwright
       - name: Full unit-test suite (includes the Drive uploader tests that need pytest)
-        run: python -m pytest -q tests --ignore=tests/ui -p no:cacheprovider
+        run: python -m pytest -q tests --ignore=tests/ui -p no:cacheprovider -rs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
