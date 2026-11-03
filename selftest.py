@@ -26,6 +26,7 @@ MODULES = [
     "faster_whisper", "ctranslate2", "googleapiclient.discovery", "googleapiclient.http",
     "google_auth_oauthlib.flow", "google.oauth2.credentials", "yt_dlp", "edge_tts",
     "pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine", "avatar_sync",
+    "ocr_engine", "visual_cues", "rapidocr_onnxruntime",
 ]
 
 
@@ -145,6 +146,54 @@ def check_avatar() -> str:
     return f"{res['frames']} frames, {res['mode']} animation, {size // 1024} KB"
 
 
+def check_ocr() -> str:
+    """Read burned-in text from a rendered video with the real OCR engine, then unload it again."""
+    import cv2
+    import numpy as np
+    import ocr_engine
+
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "t.mp4")
+        vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 10, (640, 360))
+        for _ in range(30):
+            f = np.full((360, 640, 3), 255, np.uint8)
+            cv2.putText(f, "SALE ENDS TODAY", (30, 190), cv2.FONT_HERSHEY_SIMPLEX, 1.6, (0, 0, 0), 4)
+            vw.write(f)
+        vw.release()
+        try:
+            segs = ocr_engine.extract_screen_text(path, interval=1.0)
+        finally:
+            ocr_engine.unload()
+    text = " ".join(s["text"] for s in segs).upper().replace(" ", "")
+    if "SALE" not in text or "TODAY" not in text:
+        raise RuntimeError(f"OCR did not read the text: {segs}")
+    return f"read {len(segs)} line(s): {segs[0]['text']!r}"
+
+
+def check_cues() -> str:
+    """Apply a real zoom + flash to a clip (decode, warp, re-encode, audio kept)."""
+    import cv2
+    import numpy as np
+    import video_engine
+    import visual_cues
+
+    ff = video_engine.find_ffmpeg()
+    with tempfile.TemporaryDirectory() as d:
+        src, out = os.path.join(d, "s.mp4"), os.path.join(d, "o.mp4")
+        subprocess.run([ff, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15:duration=2",
+                        "-f", "lavfi", "-i", "sine=frequency=300:duration=2", "-shortest", "-pix_fmt", "yuv420p", src],
+                       check=True, timeout=60, creationflags=_flags())
+        res = visual_cues.apply_cues_to_video(src, [{"effect": "zoom_in", "start": 0.0, "end": 1.0},
+                                                    {"effect": "flash", "start": 1.0, "end": 1.5}], out, ffmpeg_path=ff)
+        cap = cv2.VideoCapture(out)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 16)
+        ok, frame = cap.read()
+        cap.release()
+        if res["cues_applied"] != 2 or not ok or float(np.mean(frame)) < 140:
+            raise RuntimeError(f"cues were not rendered: {res}")
+    return f"{res['cues_applied']} cues over {res['frames']} frames"
+
+
 def check_app_page(app_path: Optional[Path]) -> str:
     if app_path is None or not Path(app_path).is_file():
         raise RuntimeError(f"app file not found: {app_path}")
@@ -181,6 +230,8 @@ def run_all(app_path: Optional[Path] = None, log: Callable[[str], None] = print)
         ("whisper model", "fail", check_whisper),
         ("clip pipeline", "fail", check_clip_pipeline),
         ("avatar lip-sync", "fail", check_avatar),
+        ("on-screen text (OCR)", "fail", check_ocr),
+        ("visual action cues", "fail", check_cues),
         ("app page", "fail", lambda: check_app_page(app_path)),
         ("edge-tts (online)", "warn", check_tts_online),
     ]

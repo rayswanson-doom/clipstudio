@@ -26,10 +26,10 @@ class ImportTests(unittest.TestCase):
         code = (
             "import sys\n"
             "for m in ('yt_dlp','googleapiclient','google','google_auth_oauthlib','faster_whisper',"
-            "'edge_tts','streamlit'):\n"
+            "'edge_tts','streamlit','rapidocr_onnxruntime','onnxruntime'):\n"
             "    sys.modules[m] = None\n"
             f"sys.path.insert(0, {str(ROOT / 'backend')!r})\n"
-            "import scorer, uploader, transcriber, tts_engine, video_engine, avatar_sync, pipeline\n"
+            "import scorer, uploader, transcriber, tts_engine, video_engine, avatar_sync, ocr_engine, visual_cues, pipeline\n"
             "print('imports-ok')\n"
         )
         out = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=120)

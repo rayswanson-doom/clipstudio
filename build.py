@@ -44,7 +44,8 @@ from typing import List, Optional
 ROOT = Path(__file__).resolve().parent
 APP_NAME = "CinePulseAI"
 
-BACKEND_MODULES = ["pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine", "avatar_sync"]
+BACKEND_MODULES = ["pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine", "avatar_sync",
+                   "ocr_engine", "visual_cues"]
 REQUIRED_SOURCES = [
     "launcher.py", "selftest.py", "frontend/app.py",
     *[f"backend/{m}.py" for m in BACKEND_MODULES],
@@ -57,7 +58,11 @@ COLLECT_ALL = ["streamlit", "mediapipe", "faster_whisper", "cv2", "googleapiclie
 EXTRA_COLLECT_ALL = [
     "ctranslate2", "av", "tokenizers", "onnxruntime",
     "google_auth_oauthlib", "yt_dlp", "edge_tts",
+    # on-screen text reading (RapidOCR = the PP-OCR models of PaddleOCR on ONNX; models ship inside the package)
+    "rapidocr_onnxruntime", "pyclipper", "shapely", "yaml", "PIL",
 ]
+# PaddleOCR itself is huge (~540 MB) and conflicts with opencv-python, so it is opt-in: build_exe.py --with-paddleocr
+PADDLE_COLLECT_ALL = ["paddleocr", "paddle", "paddlex"]
 PIP_NAMES = {  # import name -> pip package name, where they differ
     "cv2": "opencv-python",
     "googleapiclient": "google-api-python-client",
@@ -68,6 +73,7 @@ HIDDEN_IMPORTS = [
     "google.auth.transport.requests", "google.oauth2.credentials",
     "googleapiclient.discovery", "googleapiclient.http",
     "google_auth_oauthlib.flow", "mediapipe.tasks.python.vision",
+    "rapidocr_onnxruntime", "onnxruntime",  # imported lazily, so PyInstaller cannot see them
 ]
 COPY_METADATA = ["streamlit"]  # streamlit reads its own version via importlib.metadata
 
@@ -217,7 +223,8 @@ def fetch_whisper_model(root: Path = ROOT) -> bool:
 # --------------------------------------------------------------------------- #
 # 3. PyInstaller
 # --------------------------------------------------------------------------- #
-def build_pyinstaller_args(root: Path = ROOT, dist: Optional[Path] = None, work: Optional[Path] = None) -> List[str]:
+def build_pyinstaller_args(root: Path = ROOT, dist: Optional[Path] = None, work: Optional[Path] = None,
+                           with_paddleocr: bool = False) -> List[str]:
     dist = dist or root / "dist"
     work = work or root / "build"
     sep = os.pathsep  # ';' on Windows, ':' elsewhere - what --add-data expects
@@ -235,6 +242,10 @@ def build_pyinstaller_args(root: Path = ROOT, dist: Optional[Path] = None, work:
     for pkg in EXTRA_COLLECT_ALL:
         if _has_module(pkg):
             args += ["--collect-all", pkg]
+    if with_paddleocr:
+        for pkg in PADDLE_COLLECT_ALL:
+            args += ["--collect-all", pkg]
+        args += ["--hidden-import", "paddleocr"]
     for pkg in COPY_METADATA:
         args += ["--copy-metadata", pkg]
     for mod in HIDDEN_IMPORTS:

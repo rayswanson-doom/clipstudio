@@ -2,7 +2,7 @@ name: Build Windows exe
 
 # Run it by hand: Actions tab -> "Build Windows exe" -> Run workflow.
 # It builds on a free GitHub Windows machine, starts the finished exe to prove it
-# boots, and publishes CinePulseAI-Setup.zip (validated, then unzipped and tested exactly as a user would use it).
+# boots, and publishes CinePulseAI-Portable.zip (validated, then unzipped and tested exactly as a user would use it).
 on:
   workflow_dispatch:
 
@@ -44,10 +44,10 @@ jobs:
       - name: Unzip the FINAL zip into a clean folder (this is what the user receives)
         shell: pwsh
         run: |
-          python build_exe.py --validate-zip dist\CinePulseAI-Setup.zip
+          python build_exe.py --validate-zip dist\CinePulseAI-Portable.zip
           $pkg = Join-Path $env:RUNNER_TEMP "pkg"
           New-Item -ItemType Directory -Force $pkg | Out-Null
-          tar -xf dist\CinePulseAI-Setup.zip -C $pkg
+          tar -xf dist\CinePulseAI-Portable.zip -C $pkg
           if (-not (Test-Path "$pkg\CinePulseAI\CinePulseAI.exe")) { throw "CinePulseAI.exe missing after unzip" }
           Get-ChildItem "$pkg\CinePulseAI" | Select-Object Name | Format-Table -HideTableHeaders
 
@@ -79,8 +79,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: CinePulseAI-Setup
-          path: dist/CinePulseAI-Setup.zip
+          name: CinePulseAI-Portable
+          path: dist/CinePulseAI-Portable.zip
           retention-days: 14
           compression-level: 0
 
@@ -90,4 +90,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "build-$env:GITHUB_RUN_NUMBER"
-          gh release create $tag "dist/CinePulseAI-Setup.zip" --repo $env:GITHUB_REPOSITORY --title "CinePulse AI build $env:GITHUB_RUN_NUMBER" --notes "Windows build. Download CinePulseAI-Setup.zip, unzip it, double-click CinePulseAI.exe inside the CinePulseAI folder. No installation and no internet needed for the core features."
+          gh release create $tag "dist/CinePulseAI-Portable.zip" --repo $env:GITHUB_REPOSITORY --title "CinePulse AI build $env:GITHUB_RUN_NUMBER" --notes "Windows build. Download CinePulseAI-Portable.zip, unzip it, double-click CinePulseAI.exe inside the CinePulseAI folder. No installation and no internet needed for the core features."

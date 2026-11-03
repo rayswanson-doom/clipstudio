@@ -420,6 +420,141 @@ def generate_script(
     }
 
 
+# --------------------------------------------------------------------------- #
+# Custom script + visual action narration
+# --------------------------------------------------------------------------- #
+# Camera/visual effects the video renderer (visual_cues.py) understands. Order matters:
+# the more specific phrase ("zoom out") must be tested before the general one ("zoom").
+EFFECT_KEYWORDS = [
+    ("zoom_out", ("zoom out", "zoom away", "pull back", "pull out", "wide shot", "step back", "reveal")),
+    ("zoom_in", ("zoom in", "zoom", "push in", "move in", "closer", "close up", "close-up", "focus on", "punch in")),
+    ("pan_left", ("pan left", "slide left", "move left", "swipe left", "to the left")),
+    ("pan_right", ("pan right", "slide right", "move right", "swipe right", "to the right")),
+    ("flash", ("flash", "camera flash", "strobe", "pop")),
+    ("shake", ("shake", "rumble", "impact", "explosion", "bump", "jolt", "earthquake")),
+    ("fade", ("fade", "dissolve", "dim", "darken", "from black", "intro")),
+]
+_INLINE_CUE = re.compile(r"\[([^\[\]]{1,200})\]")
+_BEAT_SPLIT = re.compile(r"[\n;]+|\bthen\b|(?<=[.!?])\s+", re.IGNORECASE)
+
+
+def effect_for(text: str) -> str:
+    """Map a free-text direction ("slowly zoom in on the product") to a known effect, or "none"."""
+    low = text.casefold()
+    for effect, words in EFFECT_KEYWORDS:
+        if any(w in low for w in words):
+            return effect
+    return "none"
+
+
+def parse_action_prompt(action_prompt: Optional[str]) -> List[Dict[str, str]]:
+    """Split a visual-action description into ordered beats.
+
+    "Zoom in on the logo. Then pan right to the product; flash at the price"
+        -> [{"text": "Zoom in on the logo", "effect": "zoom_in"},
+            {"text": "pan right to the product", "effect": "pan_right"},
+            {"text": "flash at the price", "effect": "flash"}]
+    Directions with no known effect are kept (effect "none") so they still show up in the shot list.
+    """
+    beats: List[Dict[str, str]] = []
+    for part in _BEAT_SPLIT.split(action_prompt or ""):
+        text = re.sub(r"^[\s\-*\d.)]+", "", part or "").strip(" .,\t")
+        if len(re.findall(r"\w", text)) >= 2:
+            beats.append({"text": text, "effect": effect_for(text)})
+    return beats
+
+
+def split_sentences(text: str) -> List[str]:
+    parts = re.split(r"(?<=[.!?\u2026])\s+|\n+", text.strip())
+    return [p.strip() for p in parts if p and re.search(r"\w", p)]
+
+
+def build_narration(
+    prompt: Optional[str] = None,
+    custom_script: Optional[str] = None,
+    action_prompt: Optional[str] = None,
+    screen_text: Optional[List[str]] = None,
+    max_screen_lines: int = 8,
+) -> dict:
+    """The text to speak + a timed list of visual cues, from ANY mix of:
+
+      custom_script  the user's own script; used word for word (generate_script is skipped).
+                     "[zoom in]" style directions inside it become cues at that sentence.
+      prompt         used to generate a script only when no custom script is given.
+      action_prompt  a description of what should happen on screen (see parse_action_prompt);
+                     its beats are spread across the sentences in order.
+      screen_text    lines read from the video by OCR; narrated after the script.
+
+    Returns {"script","sentences","word_count","estimated_seconds","source","topic",
+             "cues":[{"index","sentence_index","text","effect","start","end"}], "shot_list":[str]}.
+    Cue times are ESTIMATES from word counts; use align_cues() once the real audio length is known.
+    """
+    custom = (custom_script or "").strip()
+    inline: List[tuple] = []  # (sentence_index, direction text)
+    if custom:
+        sentences_raw: List[str] = []
+        for sent in split_sentences(custom):
+            for m in _INLINE_CUE.finditer(sent):
+                inline.append((len(sentences_raw), m.group(1).strip()))
+            spoken = re.sub(r"\s+", " ", _INLINE_CUE.sub(" ", sent)).strip()
+            if re.search(r"\w", spoken):
+                sentences_raw.append(spoken)
+        if not sentences_raw:
+            raise ValueError("Your script has no speakable text (only [directions]).")
+        sentences = sentences_raw
+        source, topic = "custom", (prompt or " ".join(sentences[0].split()[:6])).strip()
+    else:
+        if not (prompt or "").strip():
+            raise ValueError("Write a prompt or paste your own script.")
+        gen = generate_script(prompt)
+        sentences, source, topic = split_sentences(gen["script"]), "generated", gen["topic"]
+
+    lines = []
+    for text in (screen_text or [])[:max_screen_lines]:
+        t = re.sub(r"\s+", " ", str(text)).strip(" .")
+        if len(re.findall(r"\w", t)) >= 2:  # drop single-character OCR noise
+            lines.append(f"The text on screen reads: {t}.")
+    sentences = sentences + lines
+
+    script = " ".join(sentences)
+    words_per = [len(s.split()) for s in sentences]
+    starts, acc = [], 0.0
+    for wc in words_per:
+        starts.append(acc)
+        acc += wc / _WORDS_PER_SECOND
+
+    cues: List[dict] = []
+    beats = parse_action_prompt(action_prompt)
+    n_sent = max(1, len(sentences) - len(lines))  # actions belong to the script part, not the OCR part
+    for i, beat in enumerate(beats):
+        si = min(n_sent - 1, int(i * n_sent / len(beats)))
+        cues.append({"sentence_index": si, "text": beat["text"], "effect": beat["effect"]})
+    for si, text in inline:
+        cues.append({"sentence_index": min(si, len(sentences) - 1), "text": text, "effect": effect_for(text)})
+    cues.sort(key=lambda c: c["sentence_index"])
+    for i, c in enumerate(cues):
+        c["index"] = i
+        c["start"] = round(starts[c["sentence_index"]], 2)
+        later = [x for x in starts if x > c["start"] + 1e-9]
+        c["end"] = round(min(later[0] if later else acc, c["start"] + 6.0), 2)  # at most 6 s per cue
+    wc = sum(words_per)
+    return {
+        "script": script, "sentences": sentences, "word_count": wc,
+        "estimated_seconds": round(wc / _WORDS_PER_SECOND, 1), "source": source, "topic": topic,
+        "cues": cues,
+        "shot_list": [f"{c['start']:.1f}s  {c['effect'].replace('_', ' ') if c['effect'] != 'none' else 'note'}: {c['text']}"
+                      for c in cues],
+    }
+
+
+def align_cues(cues: List[dict], estimated_seconds: float, actual_seconds: float) -> List[dict]:
+    """Stretch estimated cue times to the real voiceover length (TTS pace differs from 150 wpm)."""
+    if estimated_seconds <= 0 or actual_seconds <= 0:
+        return [dict(c) for c in cues]
+    k = actual_seconds / estimated_seconds
+    return [{**c, "start": round(c["start"] * k, 2), "end": round(c["end"] * k, 2)} for c in cues]
+
+
 if __name__ == "__main__":
     import argparse
     import json

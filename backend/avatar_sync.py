@@ -419,7 +419,7 @@ def _rounded_mask(w: int, h: int, radius: int):
 # --------------------------------------------------------------------------- #
 # ffmpeg writer
 # --------------------------------------------------------------------------- #
-def _open_encoder(ffmpeg: str, audio: str, output: str, size, fps: int, duration: float):
+def open_encoder(ffmpeg: str, audio: str, output: str, size, fps: int, duration: float):
     cmd = [
         ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
         "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{size[0]}x{size[1]}", "-r", str(fps), "-i", "-",
@@ -517,7 +517,7 @@ def create_avatar_video(
     # --- render -----------------------------------------------------------
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    enc = _open_encoder(ffmpeg, str(audio_path), str(out), (W, H), fps, duration)
+    enc = open_encoder(ffmpeg, str(audio_path), str(out), (W, H), fps, duration)
     try:
         for i in range(n_frames):
             av = animator.frame(float(openness[i]), i / fps)

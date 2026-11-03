@@ -2,8 +2,11 @@
 build_exe.py  -  build the CinePulse AI Windows distribution with PyInstaller.
 
     python build_exe.py --dry-run     # scan + show the PyInstaller arguments, build nothing
-    python build_exe.py               # build dist/CinePulseAI/ and CinePulseAI-Setup.zip
+    python build_exe.py               # build dist/CinePulseAI/ and dist/CinePulseAI-Portable.zip
     python build_exe.py --ci          # same, for an unattended CI machine
+    python build_exe.py --git-push    # ...then `git add .`, `git commit`, `git push origin main`
+    python build_exe.py --git-only    # only the git step (no build)
+    python build_exe.py --with-paddleocr   # also bundle PaddleOCR itself (+~540 MB, see below)
 
 Must run on WINDOWS (PyInstaller cannot cross-compile). No manual setup is
 needed beyond `pip install -r requirements-build.txt`: if bin/ffmpeg.exe or the
@@ -14,6 +17,11 @@ PyInstaller is invoked in-process with PyInstaller.__main__.run().
 Flags: --onedir --noconsole --collect-all streamlit/mediapipe/faster_whisper/
 cv2/googleapiclient (plus other runtime packages) and --add-data for frontend/,
 models/ and bin/.
+
+On-screen text reading uses RapidOCR (the PP-OCR models of PaddleOCR running on
+ONNX Runtime, ~16 MB, CPU only). It is bundled by default. PaddleOCR itself is
+supported when installed, and --with-paddleocr adds it to the bundle (it adds
+~540 MB and replaces opencv-python with opencv-contrib-python).
 
 First boot never crashes on missing Google files: token.json and credentials.json
 are optional. Without them the app still runs and keeps clips on the computer;
@@ -28,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import subprocess
 import sys
 import urllib.request
 import zipfile
@@ -37,7 +46,14 @@ from typing import List, Optional
 import build  # shared constants, preflight scan and helpers
 
 ROOT = Path(__file__).resolve().parent
-ZIP_NAME = "CinePulseAI-Setup.zip"
+ZIP_NAME = "CinePulseAI-Portable.zip"
+COMMIT_MESSAGE = "feat: add OCR frame text reading, custom script narration, and automated build package"
+COMMIT_TRAILERS = (
+    "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>",
+    "Claude-Session: https://claude.ai/code/session_01DZZzH74mQWkTiSWum5df7Q",
+)
+SECRET_FILES = {"token.json", "credentials.json"}  # must never reach a public repository
+NEVER_COMMIT_DIRS = ("dist/", "build/")
 
 FFMPEG_URLS = [
     "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
@@ -116,9 +132,9 @@ def ensure_blazeface(root: Path = ROOT, allow_download: bool = True) -> bool:
 # --------------------------------------------------------------------------- #
 # PyInstaller
 # --------------------------------------------------------------------------- #
-def pyinstaller_args(root: Path = ROOT) -> List[str]:
+def pyinstaller_args(root: Path = ROOT, with_paddleocr: bool = False) -> List[str]:
     """build.py's arguments plus --add-data for models/ and bin/."""
-    args = build.build_pyinstaller_args(root)
+    args = build.build_pyinstaller_args(root, with_paddleocr=with_paddleocr)
     sep = build.os.pathsep
     extra: List[str] = []
     for folder in ("models", "bin"):
@@ -163,7 +179,7 @@ def finalize(app_dir: Path, root: Path = ROOT, include_token: bool = True) -> Li
         "There is no console window: use 'Quit CinePulse AI' in the sidebar to stop it.\n"
         "If nothing opens, read cinepulseai.log in this folder.\n\n"
         "Works offline: transcription, highlight scoring, face-tracked cropping, AI avatar lip-sync,\n"
-        "merging. Needs internet: YouTube downloads, edge-tts voices, Google Drive backup.\n\n"
+        "merging, and reading on-screen text (OCR). Needs internet: YouTube downloads, edge-tts voices, Google Drive backup.\n\n"
         "GOOGLE DRIVE AUTO-BACKUP (optional)\n"
         "  The app runs fine without it - everything is saved in the 'outputs' folder here.\n"
         "  With a Folder ID set, every finished clip and avatar video is uploaded automatically in the\n"
@@ -222,6 +238,9 @@ def validate_zip(zip_path: Path, top: Optional[str] = None) -> List[str]:
             (f"_internal/{(build.WHISPER_REL / 'model.bin').as_posix()}", (build.WHISPER_REL / "model.bin").as_posix()),
             ("_internal/frontend/app.py", "frontend/app.py"), ("README.txt",),
         ]
+        onnx = [n for n in names if n.startswith(f"{top}/") and n.lower().endswith(".onnx") and "rapidocr" in n.lower()]
+        if len(onnx) < 2:
+            problems.append("the OCR models (rapidocr_onnxruntime/models/*.onnx) are missing from the zip")
         for options in required:
             if not has(*options):
                 problems.append(f"missing from the zip: {top}/{options[0]}")
@@ -229,12 +248,64 @@ def validate_zip(zip_path: Path, top: Optional[str] = None) -> List[str]:
         if app_py:
             text = zf.read(app_py).decode("utf-8", "replace")
             for needle in ("CinePulse AI", "Clip Repurposer Studio", "AI Generator Lab",
-                           "Enable AI Avatar Lip-Sync Commentary"):
+                           "Enable AI Avatar Lip-Sync Commentary", "Your own script", "Visual actions"):
                 if needle not in text:
                     problems.append(f"frontend/app.py in the zip lacks '{needle}'")
         if not any(n.startswith(f"{top}/") for n in names):
             problems.append(f"the zip has no top-level '{top}' folder")
     return problems
+
+
+# --------------------------------------------------------------------------- #
+# git: add / commit / push
+# --------------------------------------------------------------------------- #
+def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    proc = subprocess.run(["git", *args], cwd=str(root), capture_output=True, text=True)
+    if check and proc.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args[:2])} failed: {(proc.stderr or proc.stdout).strip()}")
+    return proc
+
+
+def git_publish(root: Path = ROOT, message: str = COMMIT_MESSAGE, trailers=COMMIT_TRAILERS,
+                remote: str = "origin", branch: str = "main", push: bool = True) -> dict:
+    """`git add .`, `git commit -m <message>`, `git push <remote> <branch>` through subprocess.
+
+    Safety: refuses (before anything is staged) when a token/credential file or a build folder
+    is not git-ignored, and un-stages and refuses if one still slipped in. Nothing to commit is
+    not an error - the push still runs so earlier local commits are published too."""
+    root = Path(root)
+    if shutil.which("git") is None:
+        raise RuntimeError("git is not installed or not on PATH")
+    if _git(root, "rev-parse", "--is-inside-work-tree", check=False).stdout.strip() != "true":
+        raise RuntimeError(f"{root} is not a git repository")
+
+    def risky(paths: List[str]) -> List[str]:
+        return [p for p in paths if Path(p).name in SECRET_FILES or p.replace("\\", "/").startswith(NEVER_COMMIT_DIRS)]
+
+    pending = _git(root, "ls-files", "--others", "--exclude-standard").stdout.splitlines()
+    tracked = _git(root, "ls-files").stdout.splitlines()
+    bad = risky(pending + tracked)
+    if bad:
+        raise RuntimeError("refusing to commit secrets/build output (add them to .gitignore): " + ", ".join(bad))
+    _git(root, "add", ".")
+    staged = _git(root, "diff", "--cached", "--name-only").stdout.splitlines()
+    bad = risky(staged)
+    if bad:  # defensive: add -f style leaks
+        _git(root, "reset", "-q")
+        raise RuntimeError("refusing to commit secrets/build output: " + ", ".join(bad))
+
+    committed = bool(staged)
+    if committed:
+        cmd = ["commit", "-m", message]
+        if trailers:
+            cmd += ["-m", "\n".join(trailers)]
+        _git(root, *cmd)
+    pushed = False
+    if push:
+        _git(root, "push", remote, branch)
+        pushed = True
+    head = _git(root, "rev-parse", "--short", "HEAD").stdout.strip()
+    return {"committed": committed, "pushed": pushed, "files": staged, "head": head}
 
 
 def make_zip(app_dir: Path, zip_path: Path) -> Path:
@@ -254,6 +325,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--skip-model-download", action="store_true", help="do not pre-fetch the Whisper model")
     ap.add_argument("--allow-non-windows", action="store_true", help="permit a test build off Windows")
     ap.add_argument("--no-zip", action="store_true", help="do not create the final zip")
+    ap.add_argument("--with-paddleocr", action="store_true", help="also bundle PaddleOCR (+~540 MB; default is RapidOCR)")
+    ap.add_argument("--git-push", action="store_true", help="after a successful build: git add ., commit, push origin main")
+    ap.add_argument("--git-only", action="store_true", help="only run the git add/commit/push step")
     ap.add_argument("--validate-zip", metavar="ZIP", help="only check an existing final zip, then exit")
     a = ap.parse_args(argv)
     if a.validate_zip:
@@ -262,6 +336,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"PROBLEM: {i}", file=sys.stderr)
         print("Zip validation passed." if not issues else f"Zip validation FAILED ({len(issues)} problem(s)).")
         return 1 if issues else 0
+    if a.git_only:
+        return _run_git_step()
     include_token = not a.no_token
     # A plain --dry-run changes nothing; a CI dry-run may fetch ffmpeg/models like the real build.
     can_download = not a.no_download and (not a.dry_run or a.ci)
@@ -271,7 +347,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     report = build.preflight(ROOT, include_token, a.require_token, False, a.allow_non_windows)
     print(report.render())
-    args = pyinstaller_args(ROOT)
+    args = pyinstaller_args(ROOT, a.with_paddleocr)
     if a.dry_run:
         print("\nPyInstaller.__main__.run([\n  " + ",\n  ".join(repr(x) for x in args) + "\n])")
         return 0 if report.ok else 1
@@ -303,6 +379,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("Zip validation passed.")
     if include_token and (app_dir / build.TOKEN_REL).is_file():
         print("\n" + build.TOKEN_WARNING)
+    if a.git_push:
+        return _run_git_step()
+    return 0
+
+
+def _run_git_step() -> int:
+    try:
+        r = git_publish(ROOT)
+    except RuntimeError as exc:
+        print(f"GIT STEP FAILED: {exc}", file=sys.stderr)
+        return 1
+    print(f"git: {'committed ' + str(len(r['files'])) + ' file(s)' if r['committed'] else 'nothing new to commit'}; "
+          f"pushed to origin/main at {r['head']}")
     return 0
 
 

@@ -34,8 +34,8 @@ Time: ~15 min of your clicking + 30-60 min of waiting. Needs only a web browser.
    the models, builds with PyInstaller, then **starts the finished exe and checks it answers**
    (the smoke test) before saving anything.
 6. **Download**: when the run is green, scroll to **Artifacts** at the bottom of the run page ->
-   click **CinePulseAI-Setup**. GitHub wraps it once more, so you unzip twice:
-   download -> unzip -> inside is `CinePulseAI-Setup.zip` -> unzip that -> folder `CinePulseAI`.
+   click **CinePulseAI-Portable**. GitHub wraps it once more, so you unzip twice:
+   download -> unzip -> inside is `CinePulseAI-Portable.zip` -> unzip that -> folder `CinePulseAI`.
 7. **Run**: open the `CinePulseAI` folder, double-click **CinePulseAI.exe**. Wait 10-40 seconds on
    first start; your browser opens the app. If Windows SmartScreen warns about an unknown publisher:
    *More info -> Run anyway* (it is your own program).
@@ -84,7 +84,7 @@ Needs a PC that can handle ~5 GB of downloads and a long build.
 3. Preview the build (changes nothing):  `python build_exe.py --dry-run`
 4. Build:  `python build_exe.py`
    It downloads `ffmpeg.exe`, the face model and the Whisper model automatically if missing, then writes
-   `dist\CinePulseAI\` and `dist\CinePulseAI-Setup.zip`.
+   `dist\CinePulseAI\` and `dist\CinePulseAI-Portable.zip`.
    - Use `--no-token` to leave `token.json` out. `--no-download` stops all downloads (you must then
      supply `bin\ffmpeg.exe` yourself).
 5. Run `dist\CinePulseAI\CinePulseAI.exe` (or send the zip to any Windows laptop).

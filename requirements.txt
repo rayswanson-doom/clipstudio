@@ -12,3 +12,4 @@ streamlit>=1.31
 playwright
 pyinstaller
 pytest
+rapidocr-onnxruntime  # on-screen text reading (PP-OCR models on ONNX, CPU only); PaddleOCR is optional

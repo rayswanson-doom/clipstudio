@@ -167,12 +167,18 @@ class VugolaTabTests(unittest.TestCase):
         self.assertTrue(f.bar.updates)
 
     def test_uploaded_file_is_saved_and_preferred_over_url(self):
-        with mock.patch.object(pipeline, "run_vugola_pipeline", return_value=VUGOLA) as rv:
+        seen = {}
+
+        def fake_pipeline(source, *a, **k):
+            seen["source"], seen["bytes"] = source, Path(source).read_bytes()  # file exists DURING the run
+            return VUGOLA
+
+        with mock.patch.object(pipeline, "run_vugola_pipeline", side_effect=fake_pipeline):
             run_app(FakeSt({"vugola_file": FakeUpload(), "vugola_url": "https://youtu.be/x"},
                            clicked=["vugola_run"]))
-        source = rv.call_args[0][0]
-        self.assertTrue(source.endswith("my clip.mp4"))
-        self.assertEqual(Path(source).read_bytes(), b"video-bytes")
+        self.assertTrue(seen["source"].endswith("my clip.mp4"))
+        self.assertEqual(seen["bytes"], b"video-bytes")
+        self.assertFalse(Path(seen["source"]).exists(), "temporary upload must be deleted after the run")
 
     def test_nothing_entered_warns_and_skips_pipeline(self):
         with mock.patch.object(pipeline, "run_vugola_pipeline") as rv:
@@ -255,6 +261,56 @@ class ViewmaxTabTests(unittest.TestCase):
         with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=res):
             f = run_app(FakeSt({"viewmax_prompt": "p"}, clicked=["viewmax_run"]))
         self.assertTrue(any("Avatar animation" in str(c) for c in f.names("markdown")))
+
+    def test_script_actions_and_ocr_options_are_forwarded(self):
+        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
+            run_app(FakeSt({"viewmax_script": "My own words.", "viewmax_actions": "Zoom in then pan right",
+                            "viewmax_read_text": True, "viewmax_bg": FakeUpload()}, clicked=["viewmax_run"]))
+        kw = rv.call_args[1]
+        self.assertEqual((kw["custom_script"], kw["action_prompt"], kw["read_background_text"]),
+                         ("My own words.", "Zoom in then pan right", True))
+
+    def test_custom_script_alone_is_enough_without_a_prompt(self):
+        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
+            f = run_app(FakeSt({"viewmax_script": "Just my script."}, clicked=["viewmax_run"]))
+        rv.assert_called_once()
+        self.assertFalse([c for c in f.names("warning") if "prompt" in c[1][0].lower()])
+
+    def test_unused_options_are_not_sent(self):
+        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
+            run_app(FakeSt({"viewmax_prompt": "p"}, clicked=["viewmax_run"]))
+        for k in ("custom_script", "action_prompt", "read_background_text"):
+            self.assertNotIn(k, rv.call_args[1])
+
+    def test_lab_uploads_are_deleted_after_the_run(self):
+        paths = []
+
+        def fake(prompt, folder, background_video=None, **k):
+            paths.append(background_video)
+            self.assertTrue(Path(background_video).exists())
+            return VIEWMAX
+
+        with mock.patch.object(pipeline, "run_viewmax_pipeline", side_effect=fake):
+            run_app(FakeSt({"viewmax_prompt": "p", "viewmax_bg": FakeUpload()}, clicked=["viewmax_run"]))
+        self.assertFalse(Path(paths[0]).exists())
+
+    def test_shot_list_and_screen_text_are_shown(self):
+        res = {**VIEWMAX, "screen_text": ["SALE 50%"],
+               "script": {**VIEWMAX["script"], "shot_list": ["0.0s  zoom in: Zoom in"]}, "cues_applied": 1}
+        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=res):
+            f = run_app(FakeSt({"viewmax_prompt": "p"}, clicked=["viewmax_run"]))
+        text = " ".join(str(c) for c in f.names("markdown"))
+        self.assertIn("SALE 50%", text)
+        self.assertIn("Zoom in", text)
+        self.assertIn("Visual actions", text)
+
+    def test_ocr_checkbox_is_forwarded_and_screen_text_chips_shown(self):
+        clip = {**CLIP, "screen_text": ["BIG SALE"]}
+        res = {**VUGOLA, "clips": [clip]}
+        with mock.patch.object(pipeline, "run_vugola_pipeline", return_value=res) as rv:
+            f = run_app(FakeSt({"vugola_url": "https://youtu.be/x", "vugola_ocr": True}, clicked=["vugola_run"]))
+        self.assertTrue(rv.call_args[1]["read_screen_text"])
+        self.assertIn("BIG SALE", " ".join(str(c) for c in f.names("markdown")))
 
     def test_empty_prompt_warns(self):
         with mock.patch.object(pipeline, "run_viewmax_pipeline") as rv:

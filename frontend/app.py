@@ -236,6 +236,16 @@ def save_upload(uploaded) -> str:
     return str(dest)
 
 
+def cleanup_uploads(paths) -> None:
+    """Delete the temporary copies of uploaded files as soon as a run is over (frees disk, closes handles)."""
+    for p in paths:
+        try:
+            if p:
+                Path(p).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def make_progress():
     """Return (callback, bar) wiring pipeline progress to a Streamlit bar."""
     bar = st.progress(0.0, text="Starting...")
@@ -354,6 +364,10 @@ def render_clip_card(i: int, clip: dict) -> None:
             if clip.get("reasons"):
                 chips = "".join(f'<span class="cp-chip">{_e(r.replace("_", " "))}</span>' for r in clip["reasons"])
                 st.markdown(f'<div class="cp-chips">{chips}</div>', unsafe_allow_html=True)
+            if clip.get("screen_text"):
+                lines = "".join(f'<span class="cp-chip">{_e(t)}</span>' for t in clip["screen_text"][:6])
+                st.markdown(f'<div class="cp-chips"><span class="cp-chip">🔤 on screen</span>{lines}</div>',
+                            unsafe_allow_html=True)
             if clip.get("drive_link"):
                 st.link_button("Open in Google Drive", clip["drive_link"])
             if clip.get("error"):
@@ -381,6 +395,11 @@ def render_clip_tab(folder_id: str) -> None:
         fallback = st.checkbox(
             "Use a centre crop if the face model can't run", value=True, key="vugola_fallback"
         )
+        ocr_on = st.checkbox(
+            "Also read on-screen text (OCR) - burned-in subtitles and titles are added to the transcript",
+            value=False, key="vugola_ocr",
+            help="Looks at one frame per second on your CPU. Slower on long videos; loaded only when you click Generate.",
+        )
 
     if st.button("Generate viral clips", type="primary", key="vugola_run"):
         if not url.strip() and uploaded is None:
@@ -389,16 +408,23 @@ def render_clip_tab(folder_id: str) -> None:
             st.error("Min length must not be greater than max length.")
         else:
             callback, bar = make_progress()
+            temp = []
             try:
-                source = save_upload(uploaded) if uploaded is not None else url.strip()
+                source = url.strip()
+                if uploaded is not None:
+                    source = save_upload(uploaded)
+                    temp.append(source)
                 st.session_state["vugola_result"] = pipeline.run_vugola_pipeline(
                     source, folder_id, top_n=top_n, min_len=min_len, max_len=max_len,
                     output_dir=str(OUTPUT_DIR), progress=callback, allow_center_fallback=fallback,
+                    read_screen_text=ocr_on,
                 )
             except Exception as exc:
                 st.session_state.pop("vugola_result", None)
                 bar.empty()
                 st.error(f"Something went wrong: {exc}")
+            finally:
+                cleanup_uploads(temp)
 
     result = st.session_state.get("vugola_result")
     if result:
@@ -427,9 +453,26 @@ def render_lab_tab(folder_id: str) -> None:
         "What should the video be about?", key="viewmax_prompt", height=120,
         placeholder="Write a motivational 30 second TikTok script about building a morning routine",
     )
+    with st.expander("Script & action narration (optional)", expanded=False):
+        custom_script = st.text_area(
+            "Your own script", key="viewmax_script", height=150,
+            placeholder="Paste the exact words to speak. Leave empty to let the app write a script from the prompt above.\n"
+                        "You can add directions inside the script, like: Welcome back! [zoom in] Today we test a drone.",
+        )
+        action_prompt = st.text_area(
+            "Visual actions", key="viewmax_actions", height=110,
+            placeholder="Describe what should happen on screen, in order. Example:\n"
+                        "Zoom in on the product. Then pan right to the price; flash when I say 'now'.",
+        )
+        st.caption("Understood directions: zoom in / zoom out, pan left / pan right, fade, flash, shake. "
+                   "They become camera moves timed to your voiceover.")
     background = st.file_uploader(
         "Background video (optional - a plain dark background is used if empty)",
         type=VIDEO_TYPES, key="viewmax_bg",
+    )
+    read_text = st.checkbox(
+        "Read & narrate the on-screen text of the background video (OCR)", value=False, key="viewmax_read_text",
+        help="Finds burned-in text in your background video and speaks it after the script.",
     )
     voice = st.selectbox("Voice", VOICES, index=0, key="viewmax_voice")
 
@@ -450,17 +493,29 @@ def render_lab_tab(folder_id: str) -> None:
                    "background video, the avatar appears as a card over it.")
 
     if st.button("Generate video", type="primary", key="viewmax_run"):
-        if not prompt.strip():
-            st.warning("Enter a prompt first.")
+        if not prompt.strip() and not custom_script.strip():
+            st.warning("Enter a prompt or paste your own script first.")
         elif avatar_on and avatar_file is None:
             st.warning("Upload an avatar picture to use AI Avatar Lip-Sync.")
         else:
             callback, bar = make_progress()
+            temp = []
             try:
-                bg_path = save_upload(background) if background is not None else None
+                bg_path = None
+                if background is not None:
+                    bg_path = save_upload(background)
+                    temp.append(bg_path)
                 extra = {}
                 if avatar_on and avatar_file is not None:
-                    extra = {"avatar_image": save_upload(avatar_file), "avatar_enabled": True}
+                    avatar_path = save_upload(avatar_file)
+                    temp.append(avatar_path)
+                    extra = {"avatar_image": avatar_path, "avatar_enabled": True}
+                if custom_script.strip():
+                    extra["custom_script"] = custom_script
+                if action_prompt.strip():
+                    extra["action_prompt"] = action_prompt
+                if read_text:
+                    extra["read_background_text"] = True
                 st.session_state["viewmax_result"] = pipeline.run_viewmax_pipeline(
                     prompt, folder_id, background_video=bg_path, voice=voice,
                     output_dir=str(OUTPUT_DIR), progress=callback, **extra,
@@ -469,6 +524,8 @@ def render_lab_tab(folder_id: str) -> None:
                 st.session_state.pop("viewmax_result", None)
                 bar.empty()
                 st.error(f"Something went wrong: {exc}")
+            finally:
+                cleanup_uploads(temp)
 
     result = st.session_state.get("viewmax_result")
     if result:
@@ -479,6 +536,8 @@ def render_lab_tab(folder_id: str) -> None:
                  ("Yes" if result.get("drive_link") else "No", "Backed up to Drive")]
         if avatar:
             tiles.append(("Mouth sync" if avatar["mode"] == "mouth-warp" else "Pulse", "Avatar animation"))
+        if result.get("cues_applied"):
+            tiles.append((result["cues_applied"], "Visual actions"))
         st.markdown(stat_tiles(tiles), unsafe_allow_html=True)
         with st.container(border=True):
             st.markdown('<div class="cp-clip-head"><span class="cp-rank">Script</span></div>', unsafe_allow_html=True)
@@ -487,6 +546,14 @@ def render_lab_tab(folder_id: str) -> None:
                 st.audio(result["audio_path"])
             if result.get("video_path"):
                 st.video(result["video_path"])
+            if result.get("screen_text"):
+                lines = "".join(f'<span class="cp-chip">{_e(t)}</span>' for t in result["screen_text"][:8])
+                st.markdown(f'<div class="cp-chips"><span class="cp-chip">🔤 read from video</span>{lines}</div>',
+                            unsafe_allow_html=True)
+            if script.get("shot_list"):
+                with st.expander("Shot list (visual actions)"):
+                    for line in script["shot_list"]:
+                        st.markdown(f"- {_e(line)}")
             if result.get("drive_link"):
                 st.link_button("Open in Google Drive", result["drive_link"])
 

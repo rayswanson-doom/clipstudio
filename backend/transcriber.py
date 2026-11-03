@@ -48,6 +48,20 @@ def _bundled_model_path():
     return None
 
 
+def unload_model() -> None:
+    """Free the Whisper model's RAM. It is loaded again, lazily, by the next transcribe_audio()."""
+    global _model
+    with _model_lock:
+        _model = None
+    import gc
+
+    gc.collect()
+
+
+def is_loaded() -> bool:
+    return _model is not None
+
+
 def _get_model():
     """Load the model once and reuse it (loading is the slow part)."""
     global _model

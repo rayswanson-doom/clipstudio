@@ -167,11 +167,120 @@ class LayoutTests(unittest.TestCase):
             page.screenshot(path=str(SHOTS / f"{name}_avatar.png"), full_page=True)
             page.close()
 
+    def test_two_tabs_and_sidebar(self):
+        page = self.open()
+        self.assertTrue(page.get_by_role("tab", name="🎬 Clip Repurposer Studio").is_visible())
+        self.assertTrue(page.get_by_role("tab", name="⚡ AI Generator Lab").is_visible())
+        sidebar = page.locator('[data-testid="stSidebar"]')
+        self.assertTrue(sidebar.get_by_label("Google Drive Folder ID", exact=True).is_visible())
+        page.screenshot(path=str(SHOTS / "desktop_clips.png"), full_page=True)
+        page.close()
+
+    def test_clip_tab_controls(self):
+        page = self.open()
+        self.assertTrue(page.get_by_label("YouTube URL").is_visible())
+        self.assertTrue(page.get_by_text("or upload a video file").is_visible())
+        self.assertTrue(page.get_by_role("button", name="Generate viral clips").is_visible())
+        page.get_by_text("Clip options").click()
+        page.get_by_text("Also read on-screen text (OCR)").wait_for(state="visible", timeout=10000)
+        page.close()
+
+    def test_lab_tab_controls_including_script_and_actions(self):
+        page = self.open()
+        page.get_by_role("tab", name="⚡ AI Generator Lab").click()
+        page.get_by_label("What should the video be about?").wait_for(state="visible", timeout=15000)
+        self.assertTrue(page.get_by_role("button", name="Generate video").is_visible())
+        page.get_by_text("Script & action narration (optional)").click()
+        page.get_by_label("Your own script").wait_for(state="visible", timeout=10000)
+        self.assertTrue(page.get_by_label("Visual actions").is_visible())
+        self.assertTrue(page.get_by_text("Read & narrate the on-screen text of the background video (OCR)").is_visible())
+        box = page.get_by_text("Enable AI Avatar Lip-Sync Commentary")
+        box.scroll_into_view_if_needed()
+        self.assertTrue(box.is_visible())
+        page.screenshot(path=str(SHOTS / "desktop_lab_script.png"), full_page=True)
+        page.close()
+
+    def test_validation_messages(self):
+        page = self.open()
+        page.get_by_role("button", name="Generate viral clips").click()
+        page.get_by_text("Paste a YouTube URL or upload a video first.").wait_for(timeout=10000)
+        page.get_by_role("tab", name="⚡ AI Generator Lab").click()
+        page.get_by_role("button", name="Generate video").click()
+        page.get_by_text("Enter a prompt or paste your own script first.").wait_for(timeout=10000)
+        page.close()
+
+    def test_no_horizontal_overflow_desktop_and_phone(self):
+        for w, h, name in ((1280, 800, "desktop"), (390, 844, "phone")):
+            page = self.open(w, h)
+            self.assert_no_horizontal_overflow(page)
+            page.get_by_role("tab", name="⚡ AI Generator Lab").click()
+            page.get_by_label("What should the video be about?").wait_for(state="visible", timeout=15000)
+            page.get_by_text("Script & action narration (optional)").click()
+            page.get_by_label("Your own script").wait_for(state="visible", timeout=10000)
+            self.assert_no_horizontal_overflow(page)
+            page.screenshot(path=str(SHOTS / f"{name}_lab_open.png"), full_page=True)
+            page.close()
+
     def test_phone_starts_with_sidebar_closed(self):
         page = self.open(390, 844)
         self.assertEqual(page.locator('[data-testid="stSidebar"]').get_attribute("data-collapsed"), "true")
         page.screenshot(path=str(SHOTS / "phone_home.png"), full_page=True)
         page.close()
+
+
+    def test_two_tabs_and_sidebar(self):
+        page = self.open()
+        self.assertTrue(page.get_by_role("tab", name="🎬 Clip Repurposer Studio").is_visible())
+        self.assertTrue(page.get_by_role("tab", name="⚡ AI Generator Lab").is_visible())
+        sidebar = page.locator('[data-testid="stSidebar"]')
+        self.assertTrue(sidebar.get_by_label("Google Drive Folder ID", exact=True).is_visible())
+        page.screenshot(path=str(SHOTS / "desktop_clips.png"), full_page=True)
+        page.close()
+
+    def test_clip_tab_controls(self):
+        page = self.open()
+        self.assertTrue(page.get_by_label("YouTube URL").is_visible())
+        self.assertTrue(page.get_by_text("or upload a video file").is_visible())
+        self.assertTrue(page.get_by_role("button", name="Generate viral clips").is_visible())
+        page.get_by_text("Clip options").click()
+        page.get_by_text("Also read on-screen text (OCR)").wait_for(state="visible", timeout=10000)
+        page.close()
+
+    def test_lab_controls_including_script_actions_and_ocr(self):
+        page = self.open()
+        page.get_by_role("tab", name="⚡ AI Generator Lab").click()
+        page.get_by_label("What should the video be about?").wait_for(state="visible", timeout=15000)
+        self.assertTrue(page.get_by_role("button", name="Generate video").is_visible())
+        page.get_by_text("Script & action narration (optional)").click()
+        page.get_by_label("Your own script").wait_for(state="visible", timeout=10000)
+        self.assertTrue(page.get_by_label("Visual actions").is_visible())
+        self.assertTrue(page.get_by_text("Read & narrate the on-screen text of the background video (OCR)").is_visible())
+        box = page.get_by_text("Enable AI Avatar Lip-Sync Commentary")
+        box.scroll_into_view_if_needed()
+        self.assertTrue(box.is_visible())
+        page.screenshot(path=str(SHOTS / "desktop_lab.png"), full_page=True)
+        page.close()
+
+    def test_validation_messages(self):
+        page = self.open()
+        page.get_by_role("button", name="Generate viral clips").click()
+        page.get_by_text("Paste a YouTube URL or upload a video first.").wait_for(timeout=10000)
+        page.get_by_role("tab", name="⚡ AI Generator Lab").click()
+        page.get_by_role("button", name="Generate video").click()
+        page.get_by_text("Enter a prompt or paste your own script first.").wait_for(timeout=10000)
+        page.close()
+
+    def test_no_horizontal_overflow_desktop_and_phone(self):
+        for w, h, name in ((1280, 800, "desktop"), (390, 844, "phone")):
+            page = self.open(w, h)
+            self.assert_no_horizontal_overflow(page)
+            page.get_by_role("tab", name="⚡ AI Generator Lab").click()
+            page.get_by_label("What should the video be about?").wait_for(state="visible", timeout=15000)
+            page.get_by_text("Script & action narration (optional)").click()
+            page.get_by_label("Your own script").wait_for(state="visible", timeout=10000)
+            self.assert_no_horizontal_overflow(page)
+            page.screenshot(path=str(SHOTS / f"{name}_lab_open.png"), full_page=True)
+            page.close()
 
 
 if __name__ == "__main__":

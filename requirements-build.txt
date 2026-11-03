@@ -10,3 +10,4 @@ mediapipe
 numpy
 streamlit>=1.31
 pyinstaller
+rapidocr-onnxruntime  # on-screen text reading (PP-OCR models on ONNX, CPU only); PaddleOCR is optional

@@ -2,6 +2,7 @@
 dist finishing and zip. PyInstaller itself is stubbed (it can't run off Windows)."""
 import io
 import shutil
+import subprocess
 import json
 import os
 import sys
@@ -249,6 +250,10 @@ class MainTests(unittest.TestCase):
                     (app / "_internal" / rel).parent.mkdir(parents=True, exist_ok=True)
                     (app / "_internal" / rel).write_bytes(b"x")
                 (app / build.exe_name()).write_text("exe")
+                ocr = app / "_internal" / "rapidocr_onnxruntime" / "models"
+                ocr.mkdir(parents=True)
+                for m in ("det.onnx", "rec.onnx", "cls.onnx"):
+                    (ocr / m).write_bytes(b"x")
                 (app / "_internal" / "frontend").mkdir()
                 shutil.copy2(ROOT / "frontend" / "app.py", app / "_internal" / "frontend" / "app.py")
                 return 0
@@ -267,7 +272,7 @@ class MainTests(unittest.TestCase):
             self.assertNotIn("WARNING: ffmpeg", out.getvalue())
             self.assertIn("Zip validation passed", out.getvalue())
             self.assertEqual(build_exe.validate_zip(z), [])
-            self.assertEqual(build_exe.ZIP_NAME, "CinePulseAI-Setup.zip")
+            self.assertEqual(build_exe.ZIP_NAME, "CinePulseAI-Portable.zip")
 
     def test_errors_stop_before_pyinstaller(self):
         with tempfile.TemporaryDirectory() as d:
@@ -323,6 +328,8 @@ def make_zip_file(path, skip=(), app_text=None):
         f"{top}/_internal/{(build.WHISPER_REL / 'model.bin').as_posix()}": b"x",
         f"{top}/_internal/frontend/app.py": (app_text if app_text is not None else REAL_APP).encode(),
         f"{top}/README.txt": b"hi",
+        f"{top}/_internal/rapidocr_onnxruntime/models/ch_PP-OCRv4_det_infer.onnx": b"x",
+        f"{top}/_internal/rapidocr_onnxruntime/models/ch_PP-OCRv4_rec_infer.onnx": b"x",
     }
     with zipfile.ZipFile(path, "w") as zf:
         for name, data in members.items():
@@ -343,7 +350,7 @@ class ValidateZipTests(unittest.TestCase):
     def test_each_missing_piece_is_reported(self):
         for skip, text in ((build.exe_name(), build.exe_name()), ("ffmpeg.exe", "ffmpeg"),
                            (".tflite", "tflite"), ("model.bin", "model.bin"), ("app.py", "app.py"),
-                           ("README.txt", "README")):
+                           ("README.txt", "README"), (".onnx", "OCR models")):
             problems = build_exe.validate_zip(make_zip_file(self.z, skip=(skip,)))
             self.assertTrue(any(text in p for p in problems), (skip, problems))
 
@@ -366,7 +373,85 @@ class ValidateZipTests(unittest.TestCase):
             self.assertEqual(build_exe.main(["--validate-zip", str(self.z)]), 1)
 
 
+class GitPublishTests(unittest.TestCase):
+    """Real git in a temp repo with a bare 'origin' - no network."""
+
+    def setUp(self):
+        self.d = tempfile.TemporaryDirectory()
+        self.addCleanup(self.d.cleanup)
+        base = Path(self.d.name)
+        self.remote, self.work = base / "origin.git", base / "work"
+        for args, cwd in ((["init", "-q", "--bare", "-b", "main", str(self.remote)], base),
+                          (["init", "-q", "-b", "main", str(self.work)], base)):
+            subprocess.run(["git", *args], cwd=cwd, check=True)
+        for args in (["config", "user.email", "t@example.com"], ["config", "user.name", "T"],
+                     ["remote", "add", "origin", str(self.remote)]):
+            subprocess.run(["git", *args], cwd=self.work, check=True)
+        (self.work / ".gitignore").write_text("token.json\ncredentials.json\ndist/\nbuild/\n")
+        (self.work / "a.py").write_text("print(1)\n")
+
+    def remote_log(self):
+        return subprocess.run(["git", "log", "-1", "--format=%B", "main"], cwd=self.remote, capture_output=True,
+                              text=True, check=True).stdout
+
+    def test_add_commit_push_with_the_requested_message(self):
+        r = build_exe.git_publish(self.work)
+        self.assertTrue(r["committed"] and r["pushed"])
+        self.assertIn("a.py", r["files"])
+        log = self.remote_log()
+        self.assertTrue(log.startswith("feat: add OCR frame text reading, custom script narration, and automated build package"))
+        self.assertIn("Claude-Session:", log)
+
+    def test_second_run_with_nothing_new_does_not_fail_or_commit(self):
+        build_exe.git_publish(self.work)
+        r = build_exe.git_publish(self.work)
+        self.assertFalse(r["committed"])
+        self.assertTrue(r["pushed"])
+
+    def test_ignored_secrets_are_left_out(self):
+        (self.work / "token.json").write_text("{}")
+        (self.work / "dist").mkdir()
+        (self.work / "dist" / "x.zip").write_bytes(b"x")
+        r = build_exe.git_publish(self.work)
+        self.assertEqual(sorted(r["files"]), [".gitignore", "a.py"])
+
+    def test_unignored_secret_is_refused_before_staging(self):
+        (self.work / ".gitignore").write_text("")
+        (self.work / "token.json").write_text("{}")
+        with self.assertRaisesRegex(RuntimeError, "token.json"):
+            build_exe.git_publish(self.work)
+        staged = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=self.work, capture_output=True, text=True)
+        self.assertEqual(staged.stdout.strip(), "")
+
+    def test_not_a_repo_and_push_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(RuntimeError, "not a git repository"):
+                build_exe.git_publish(Path(d))
+        subprocess.run(["git", "remote", "set-url", "origin", str(self.remote) + "-missing"], cwd=self.work, check=True)
+        with self.assertRaisesRegex(RuntimeError, "git push .*failed"):
+            build_exe.git_publish(self.work)
+
+    def test_cli_git_only(self):
+        with mock.patch.object(build_exe, "ROOT", self.work), mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(build_exe.main(["--git-only"]), 0)
+        self.assertIn("pushed to origin/main", out.getvalue())
+        (self.work / "token.json").write_text("{}")
+        (self.work / ".gitignore").write_text("")
+        with mock.patch.object(build_exe, "ROOT", self.work), mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(build_exe.main(["--git-only"]), 1)
+        self.assertIn("GIT STEP FAILED", err.getvalue())
+
+
 class PackagingContentsTests(unittest.TestCase):
+    def test_ocr_and_paddle_flags(self):
+        args = build.build_pyinstaller_args(ROOT)
+        for mod in ("ocr_engine", "visual_cues", "rapidocr_onnxruntime"):
+            self.assertIn(mod, args)
+        self.assertNotIn("paddleocr", args)  # opt-in only
+        pad = build.build_pyinstaller_args(ROOT, with_paddleocr=True)
+        for pkg in ("paddleocr", "paddle", "paddlex"):
+            self.assertIn(pkg, pad)
+
     def test_pyinstaller_args_bundle_everything_new(self):
         args = build_exe.pyinstaller_args(ROOT)
         for flag in ("--onedir", "--noconsole"):
