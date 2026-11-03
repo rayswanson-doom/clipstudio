@@ -26,6 +26,8 @@ def size_mb(pkg):
     return sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(d) for f in fs) / 1e6
 
 
+import cv2 as _cv
+print("cv2 file:", _cv.__file__, _cv.__version__)
 print("python", sys.version.split()[0], "numpy", ver("numpy"), "opencv", ver("opencv-python"), "mediapipe", ver("mediapipe"))
 for name in ("paddlepaddle", "paddleocr", "paddlex", "rapidocr", "rapidocr-onnxruntime", "onnxruntime"):
     print(f"  {name}: {ver(name)}")
@@ -37,8 +39,9 @@ try:
     from paddleocr import PaddleOCR
     print("import ok", paddleocr.__version__, f"{time.time()-t:.1f}s")
     t = time.time()
-    try:  # 3.x
-        eng = PaddleOCR(lang="en", use_doc_orientation_classify=False, use_doc_unwarping=False, use_textline_orientation=False)
+    try:  # 3.x  (enable_mkldnn=False avoids the oneDNN crash seen on Windows CPU)
+        eng = PaddleOCR(lang="en", use_doc_orientation_classify=False, use_doc_unwarping=False,
+                        use_textline_orientation=False, enable_mkldnn=False)
         res = eng.predict(img)
         texts = [x for r in res for x in (r.get("rec_texts") if hasattr(r, "get") else r["rec_texts"])]
     except TypeError:  # 2.x
