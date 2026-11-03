@@ -2,7 +2,7 @@
 build_exe.py  -  build the CinePulse AI Windows distribution with PyInstaller.
 
     python build_exe.py --dry-run     # scan + show the PyInstaller arguments, build nothing
-    python build_exe.py               # build dist/CinePulseAI/ and CinePulseAI-Final-Executable.zip
+    python build_exe.py               # build dist/CinePulseAI/ and CinePulseAI-Setup.zip
     python build_exe.py --ci          # same, for an unattended CI machine
 
 Must run on WINDOWS (PyInstaller cannot cross-compile). No manual setup is
@@ -37,7 +37,7 @@ from typing import List, Optional
 import build  # shared constants, preflight scan and helpers
 
 ROOT = Path(__file__).resolve().parent
-ZIP_NAME = "CinePulseAI-Final-Executable.zip"
+ZIP_NAME = "CinePulseAI-Setup.zip"
 
 FFMPEG_URLS = [
     "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
@@ -162,10 +162,12 @@ def finalize(app_dir: Path, root: Path = ROOT, include_token: bool = True) -> Li
         f"Double-click {build.exe_name()}. Your browser opens the app at http://localhost:8501.\n"
         "There is no console window: use 'Quit CinePulse AI' in the sidebar to stop it.\n"
         "If nothing opens, read cinepulseai.log in this folder.\n\n"
-        "Works offline: transcription, highlight scoring, face-tracked cropping, merging.\n"
-        "Needs internet: YouTube downloads, edge-tts voices, Google Drive upload.\n\n"
-        "GOOGLE DRIVE (optional)\n"
-        "  The app runs fine without it - clips are simply saved in the 'outputs' folder here.\n"
+        "Works offline: transcription, highlight scoring, face-tracked cropping, AI avatar lip-sync,\n"
+        "merging. Needs internet: YouTube downloads, edge-tts voices, Google Drive backup.\n\n"
+        "GOOGLE DRIVE AUTO-BACKUP (optional)\n"
+        "  The app runs fine without it - everything is saved in the 'outputs' folder here.\n"
+        "  With a Folder ID set, every finished clip and avatar video is uploaded automatically in the\n"
+        "  background (temporary network errors are retried). If Drive fails, your files stay on this computer.\n"
         "  token.json       -> put it in THIS folder (next to CinePulseAI.exe) for uploads with no sign-in.\n"
         "  credentials.json -> alternatively put your OAuth client file here; the first upload\n"
         "                      then opens a Google sign-in page and creates token.json.\n"
@@ -191,6 +193,50 @@ def verify(app_dir: Path, include_token: bool) -> List[str]:
     return problems
 
 
+def validate_zip(zip_path: Path, top: Optional[str] = None) -> List[str]:
+    """Open the FINAL archive and check that what the user will unzip is complete.
+    Returns a list of problems (empty = good)."""
+    import zipfile
+
+    top = top or build.APP_NAME
+    zip_path = Path(zip_path)
+    if not zip_path.is_file():
+        return [f"{zip_path} does not exist"]
+    problems: List[str] = []
+    try:
+        zf = zipfile.ZipFile(zip_path)
+    except zipfile.BadZipFile as exc:
+        return [f"not a valid zip file: {exc}"]
+    with zf:
+        bad = zf.testzip()
+        if bad:
+            problems.append(f"corrupt entry in the zip: {bad}")
+        names = set(zf.namelist())
+
+        def has(*options: str) -> bool:
+            return any(f"{top}/{o}" in names for o in options)
+
+        required = [
+            (build.exe_name(),), (f"_internal/{build.FFMPEG_REL.as_posix()}", build.FFMPEG_REL.as_posix()),
+            (f"_internal/{build.BLAZEFACE_REL.as_posix()}", build.BLAZEFACE_REL.as_posix()),
+            (f"_internal/{(build.WHISPER_REL / 'model.bin').as_posix()}", (build.WHISPER_REL / "model.bin").as_posix()),
+            ("_internal/frontend/app.py", "frontend/app.py"), ("README.txt",),
+        ]
+        for options in required:
+            if not has(*options):
+                problems.append(f"missing from the zip: {top}/{options[0]}")
+        app_py = next((f"{top}/{o}" for o in ("_internal/frontend/app.py", "frontend/app.py") if f"{top}/{o}" in names), None)
+        if app_py:
+            text = zf.read(app_py).decode("utf-8", "replace")
+            for needle in ("CinePulse AI", "Clip Repurposer Studio", "AI Generator Lab",
+                           "Enable AI Avatar Lip-Sync Commentary"):
+                if needle not in text:
+                    problems.append(f"frontend/app.py in the zip lacks '{needle}'")
+        if not any(n.startswith(f"{top}/") for n in names):
+            problems.append(f"the zip has no top-level '{top}' folder")
+    return problems
+
+
 def make_zip(app_dir: Path, zip_path: Path) -> Path:
     zip_path.unlink(missing_ok=True)
     made = shutil.make_archive(str(zip_path.with_suffix("")), "zip", root_dir=app_dir.parent, base_dir=app_dir.name)
@@ -208,7 +254,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--skip-model-download", action="store_true", help="do not pre-fetch the Whisper model")
     ap.add_argument("--allow-non-windows", action="store_true", help="permit a test build off Windows")
     ap.add_argument("--no-zip", action="store_true", help="do not create the final zip")
+    ap.add_argument("--validate-zip", metavar="ZIP", help="only check an existing final zip, then exit")
     a = ap.parse_args(argv)
+    if a.validate_zip:
+        issues = validate_zip(Path(a.validate_zip))
+        for i in issues:
+            print(f"PROBLEM: {i}", file=sys.stderr)
+        print("Zip validation passed." if not issues else f"Zip validation FAILED ({len(issues)} problem(s)).")
+        return 1 if issues else 0
     include_token = not a.no_token
     # A plain --dry-run changes nothing; a CI dry-run may fetch ffmpeg/models like the real build.
     can_download = not a.no_download and (not a.dry_run or a.ci)
@@ -242,6 +295,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not a.no_zip:
         z = make_zip(app_dir, ROOT / "dist" / ZIP_NAME)
         print(f"Archive: {z} ({z.stat().st_size / 1e6:.0f} MB)")
+        issues = validate_zip(z)
+        for i in issues:
+            print(f"PROBLEM: {i}", file=sys.stderr)
+        if issues:
+            return 1
+        print("Zip validation passed.")
     if include_token and (app_dir / build.TOKEN_REL).is_file():
         print("\n" + build.TOKEN_WARNING)
     return 0

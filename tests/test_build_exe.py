@@ -1,6 +1,7 @@
 """build_exe.py: arguments, in-process PyInstaller call, ffmpeg/model auto-placement,
 dist finishing and zip. PyInstaller itself is stubbed (it can't run off Windows)."""
 import io
+import shutil
 import json
 import os
 import sys
@@ -248,6 +249,8 @@ class MainTests(unittest.TestCase):
                     (app / "_internal" / rel).parent.mkdir(parents=True, exist_ok=True)
                     (app / "_internal" / rel).write_bytes(b"x")
                 (app / build.exe_name()).write_text("exe")
+                (app / "_internal" / "frontend").mkdir()
+                shutil.copy2(ROOT / "frontend" / "app.py", app / "_internal" / "frontend" / "app.py")
                 return 0
 
             with mock.patch.object(build_exe, "ROOT", proj), mock.patch.object(build, "ROOT", proj), mock.patch.object(
@@ -262,6 +265,9 @@ class MainTests(unittest.TestCase):
             with zipfile.ZipFile(z) as zf:
                 self.assertIn("CinePulseAI/token.json", zf.namelist())
             self.assertNotIn("WARNING: ffmpeg", out.getvalue())
+            self.assertIn("Zip validation passed", out.getvalue())
+            self.assertEqual(build_exe.validate_zip(z), [])
+            self.assertEqual(build_exe.ZIP_NAME, "CinePulseAI-Setup.zip")
 
     def test_errors_stop_before_pyinstaller(self):
         with tempfile.TemporaryDirectory() as d:
@@ -303,3 +309,85 @@ class WorkflowFileTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+REAL_APP = (ROOT / "frontend" / "app.py").read_text(encoding="utf-8")
+
+
+def make_zip_file(path, skip=(), app_text=None):
+    top = build.APP_NAME
+    members = {
+        f"{top}/{build.exe_name()}": b"exe",
+        f"{top}/_internal/{build.FFMPEG_REL.as_posix()}": b"x",
+        f"{top}/_internal/{build.BLAZEFACE_REL.as_posix()}": b"x",
+        f"{top}/_internal/{(build.WHISPER_REL / 'model.bin').as_posix()}": b"x",
+        f"{top}/_internal/frontend/app.py": (app_text if app_text is not None else REAL_APP).encode(),
+        f"{top}/README.txt": b"hi",
+    }
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, data in members.items():
+            if not any(k in name for k in skip):
+                zf.writestr(name, data)
+    return path
+
+
+class ValidateZipTests(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.TemporaryDirectory()
+        self.addCleanup(self.d.cleanup)
+        self.z = Path(self.d.name) / "x.zip"
+
+    def test_good_zip_passes(self):
+        self.assertEqual(build_exe.validate_zip(make_zip_file(self.z)), [])
+
+    def test_each_missing_piece_is_reported(self):
+        for skip, text in ((build.exe_name(), build.exe_name()), ("ffmpeg.exe", "ffmpeg"),
+                           (".tflite", "tflite"), ("model.bin", "model.bin"), ("app.py", "app.py"),
+                           ("README.txt", "README")):
+            problems = build_exe.validate_zip(make_zip_file(self.z, skip=(skip,)))
+            self.assertTrue(any(text in p for p in problems), (skip, problems))
+
+    def test_old_ui_in_the_zip_is_caught(self):
+        problems = build_exe.validate_zip(make_zip_file(self.z, app_text="old UI Vugola AI Mode"))
+        self.assertTrue(any("Enable AI Avatar Lip-Sync Commentary" in p for p in problems))
+
+    def test_missing_and_corrupt_zip(self):
+        self.assertTrue(build_exe.validate_zip(Path(self.d.name) / "none.zip"))
+        self.z.write_bytes(b"not a zip")
+        self.assertTrue(any("not a valid zip" in p for p in build_exe.validate_zip(self.z)))
+
+    def test_cli_flag(self):
+        make_zip_file(self.z)
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(build_exe.main(["--validate-zip", str(self.z)]), 0)
+        self.assertIn("passed", out.getvalue())
+        make_zip_file(self.z, skip=("README",))
+        with mock.patch("sys.stdout", new_callable=io.StringIO), mock.patch("sys.stderr", new_callable=io.StringIO):
+            self.assertEqual(build_exe.main(["--validate-zip", str(self.z)]), 1)
+
+
+class PackagingContentsTests(unittest.TestCase):
+    def test_pyinstaller_args_bundle_everything_new(self):
+        args = build_exe.pyinstaller_args(ROOT)
+        for flag in ("--onedir", "--noconsole"):
+            self.assertIn(flag, args)
+        self.assertNotIn("--onefile", args)
+        pairs = list(zip(args, args[1:]))
+        self.assertIn(("--hidden-import", "avatar_sync"), pairs)
+        self.assertIn(("--hidden-import", "selftest"), pairs)
+        datas = [b for a, b in pairs if a == "--add-data"]
+        for folder in ("frontend", "models", "bin"):
+            self.assertTrue(any(d.endswith(f"{os.pathsep}{folder}") for d in datas), (folder, datas))
+        self.assertTrue(args[-1].endswith("launcher.py"))
+
+    def test_avatar_module_is_a_required_source_and_exists(self):
+        self.assertIn("backend/avatar_sync.py", build.REQUIRED_SOURCES)
+        self.assertTrue((ROOT / "backend" / "avatar_sync.py").is_file())
+
+    def test_readme_mentions_background_backup_and_avatar(self):
+        with tempfile.TemporaryDirectory() as d:
+            app = Path(d)
+            build_exe.finalize(app, ROOT, include_token=False)
+            text = (app / "README.txt").read_text(encoding="utf-8")
+        for needle in ("lip-sync", "background", "token.json", "credentials.json", "CinePulseAI.exe"):
+            self.assertIn(needle, text)

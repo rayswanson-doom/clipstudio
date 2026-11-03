@@ -30,8 +30,10 @@ import logging
 import mimetypes
 import os
 import sys
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +250,89 @@ def upload_to_google_drive(file_path: str, folder_id: str) -> str:
     )
     logger.info("Uploaded %s -> %s", path.name, link)
     return link
+
+
+# --------------------------------------------------------------------------- #
+# Automatic background backup
+# --------------------------------------------------------------------------- #
+_RETRY_HTTP_STATUS = {429, 500, 502, 503, 504}
+
+
+def is_transient_error(exc: BaseException) -> bool:
+    """True for temporary problems worth retrying (flaky network, Drive 5xx / rate limit).
+    False for things a retry cannot fix: missing files, missing credentials, bad arguments,
+    permission or not-found errors."""
+    if isinstance(exc, (FileNotFoundError, PermissionError, ValueError, KeyboardInterrupt)):
+        return False
+    status = getattr(getattr(exc, "resp", None), "status", None)  # googleapiclient HttpError
+    if status is not None:
+        return int(status) in _RETRY_HTTP_STATUS
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return True
+    # DNS failure / SSL hiccup / dropped socket (names checked so we need no optional imports)
+    return type(exc).__name__ in {"ServerNotFoundError", "SSLError", "RemoteDisconnected", "IncompleteRead",
+                                  "ReadTimeout", "ConnectTimeout", "timeout"}
+
+
+def upload_with_retry(
+    file_path: str,
+    folder_id: str,
+    attempts: int = 3,
+    base_delay: float = 2.0,
+    sleep: Callable[[float], None] = time.sleep,
+    upload_fn: Optional[Callable[[str, str], str]] = None,
+) -> str:
+    """upload_to_google_drive with automatic retries (2 s, 4 s, ...) for temporary errors only."""
+    fn = upload_fn or upload_to_google_drive
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return fn(file_path, folder_id)
+        except Exception as exc:
+            if attempt >= attempts or not is_transient_error(exc):
+                raise
+            delay = base_delay * (2 ** (attempt - 1))
+            logger.warning("Drive upload of %s failed (%s); retry %d/%d in %.0fs",
+                           Path(str(file_path)).name, exc, attempt, attempts - 1, delay)
+            sleep(delay)
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
+class DriveBackup:
+    """Uploads finished files to Drive on ONE background thread, so the next clip can be
+    processed while the previous one is still uploading.
+
+        with DriveBackup(folder_id) as backup:
+            future = backup.submit("clip1.mp4")      # returns immediately
+            ...                                       # keep working
+            link = future.result()                    # raises if the upload finally failed
+
+    A failed upload never touches the local file: the caller keeps it and just reports the error.
+    One worker keeps the (non-thread-safe) Google client and the one-time sign-in single-threaded.
+    """
+
+    def __init__(self, folder_id: str, upload_fn: Optional[Callable[[str, str], str]] = None,
+                 attempts: int = 3, base_delay: float = 2.0):
+        if not folder_id or not str(folder_id).strip():
+            raise ValueError("folder_id must be a non-empty Google Drive folder ID")
+        self.folder_id = str(folder_id).strip()
+        self._upload_fn = upload_fn
+        self._attempts, self._base_delay = attempts, base_delay
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drive-backup")
+
+    def submit(self, file_path: str) -> Future:
+        return self._pool.submit(
+            upload_with_retry, str(file_path), self.folder_id, self._attempts, self._base_delay,
+            time.sleep, self._upload_fn,
+        )
+
+    def close(self, wait: bool = True) -> None:
+        self._pool.shutdown(wait=wait)
+
+    def __enter__(self) -> "DriveBackup":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
 
 # --------------------------------------------------------------------------- #

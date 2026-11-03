@@ -29,8 +29,8 @@ jobs:
           python -m playwright install --with-deps chromium
       - name: Layout tests (real browser)
         run: python -m unittest -v tests.ui.test_layout_playwright
-      - name: Unit tests
-        run: python -m unittest tests.test_app_logic tests.test_launcher tests.test_build tests.test_build_exe tests.test_pipeline tests.test_offline_audit tests.test_scorer
+      - name: Full unit-test suite (includes the Drive uploader tests that need pytest)
+        run: python -m pytest -q tests --ignore=tests/ui -p no:cacheprovider
       - uses: actions/upload-artifact@v4
         if: always()
         with:

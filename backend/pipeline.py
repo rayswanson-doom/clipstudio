@@ -26,14 +26,14 @@ try:  # package import (backend.pipeline) or plain module (pipeline)
     from .scorer import find_viral_clips, generate_script
     from .transcriber import transcribe_audio
     from .tts_engine import DEFAULT_VOICE, generate_voiceover
-    from .uploader import download_media, drive_status, upload_to_google_drive
+    from .uploader import DriveBackup, download_media, drive_status, upload_to_google_drive
     from .video_engine import create_vertical_short, merge_audio_with_video
 except ImportError:  # pragma: no cover
     from avatar_sync import create_avatar_video, load_avatar
     from scorer import find_viral_clips, generate_script
     from transcriber import transcribe_audio
     from tts_engine import DEFAULT_VOICE, generate_voiceover
-    from uploader import download_media, drive_status, upload_to_google_drive
+    from uploader import DriveBackup, download_media, drive_status, upload_to_google_drive
     from video_engine import create_vertical_short, merge_audio_with_video
 
 logger = logging.getLogger(__name__)
@@ -123,27 +123,42 @@ def run_vugola_pipeline(
 
     stem = _safe_name(Path(local).stem)
     clips = []
-    for idx, pick in enumerate(picks, start=1):
-        _emit(progress, f"Cropping and uploading clip {idx} of {len(picks)}", 0.50 + 0.48 * (idx - 1) / len(picks))
-        clip = {**pick, "output_path": None, "drive_link": None, "error": None, "faces_found": None}
-        target = out_dir / f"{stem}_clip{idx}_{int(pick['start'])}-{int(pick['end'])}.mp4"
-        try:
-            res = create_vertical_short(
-                local, str(target),
-                start_time=pick["start"], end_time=pick["end"],
-                folder_id=folder_id or None, ffmpeg_path=ffmpeg_path,
-                detector=detector, allow_center_fallback=allow_center_fallback,
-                upload=bool(folder_id),
-            )
-            clip["output_path"] = res["output_path"]
-            clip["drive_link"] = res["drive_link"]
-            clip["faces_found"] = res["faces_found"]
-        except Exception as exc:  # keep going; report per clip
-            logger.exception("Clip %d failed", idx)
-            clip["error"] = str(exc)
-            if target.is_file():  # clip was made but the upload failed
-                clip["output_path"] = str(target.resolve())
-        clips.append(clip)
+    pending = []  # (clip, future) - Drive uploads running in the background
+    backup = DriveBackup(folder_id, upload_fn=upload_to_google_drive) if folder_id else None
+    try:
+        for idx, pick in enumerate(picks, start=1):
+            _emit(progress, f"Cropping clip {idx} of {len(picks)}" + (" (earlier clips upload in the background)" if backup and idx > 1 else ""),
+                  0.50 + 0.40 * (idx - 1) / len(picks))
+            clip = {**pick, "output_path": None, "drive_link": None, "error": None, "faces_found": None}
+            target = out_dir / f"{stem}_clip{idx}_{int(pick['start'])}-{int(pick['end'])}.mp4"
+            try:
+                res = create_vertical_short(
+                    local, str(target),
+                    start_time=pick["start"], end_time=pick["end"],
+                    ffmpeg_path=ffmpeg_path, detector=detector,
+                    allow_center_fallback=allow_center_fallback,
+                    upload=False,  # the background DriveBackup uploads it below
+                )
+                clip["output_path"] = res["output_path"]
+                clip["faces_found"] = res["faces_found"]
+                if backup:
+                    pending.append((clip, backup.submit(res["output_path"])))
+            except Exception as exc:  # keep going; report per clip
+                logger.exception("Clip %d failed", idx)
+                clip["error"] = str(exc)
+            clips.append(clip)
+
+        if pending:
+            _emit(progress, "Finishing the Google Drive backup", 0.92)
+        for clip, future in pending:
+            try:
+                clip["drive_link"] = future.result()
+            except Exception as exc:  # the clip stays safe on this computer
+                logger.warning("Drive backup failed for %s: %s", clip["output_path"], exc)
+                clip["error"] = str(exc)
+    finally:
+        if backup:
+            backup.close()
 
     made = [c for c in clips if c["faces_found"] is not None]
     if made and all(c["faces_found"] == 0 for c in made):
@@ -217,8 +232,13 @@ def run_viewmax_pipeline(
 
     drive_link = None
     if folder_id:
-        _emit(progress, "Uploading to Google Drive", 0.85)
-        drive_link = upload_to_google_drive(video_path, folder_id)
+        _emit(progress, "Backing up to Google Drive", 0.85)
+        try:
+            with DriveBackup(folder_id, upload_fn=upload_to_google_drive) as backup:
+                drive_link = backup.submit(video_path).result()
+        except Exception as exc:  # never lose the finished video because Drive is unreachable
+            logger.warning("Drive backup failed: %s", exc)
+            warnings.append(f"Google Drive backup failed ({exc}). Your video is saved on this computer.")
 
     _emit(progress, "Done", 1.0)
     return {

@@ -2,7 +2,7 @@ name: Build Windows exe
 
 # Run it by hand: Actions tab -> "Build Windows exe" -> Run workflow.
 # It builds on a free GitHub Windows machine, starts the finished exe to prove it
-# boots, and publishes CinePulseAI-Final-Executable.zip as a downloadable artifact.
+# boots, and publishes CinePulseAI-Setup.zip (validated, then unzipped and tested exactly as a user would use it).
 on:
   workflow_dispatch:
 
@@ -38,24 +38,32 @@ jobs:
           import os
           open("token.json", "w", encoding="utf-8").write(os.environ["GOOGLE_TOKEN_JSON"])
 
-      - name: Build (downloads ffmpeg + models automatically)
-        run: python build_exe.py --ci --no-zip
+      - name: Build the app and the final zip (downloads ffmpeg + models, then validates the zip)
+        run: python build_exe.py --ci
 
-      - name: Self-test the packaged exe (imports, ffmpeg, face model, Whisper, a real clip, the app page)
+      - name: Unzip the FINAL zip into a clean folder (this is what the user receives)
         shell: pwsh
         run: |
-          $st = Join-Path $env:RUNNER_TEMP "selftest"
-          Copy-Item dist\CinePulseAI $st -Recurse
-          $p = Start-Process -FilePath "$st\CinePulseAI.exe" -ArgumentList "--selftest" -Wait -PassThru
-          if (Test-Path "$st\cinepulseai.log") { Get-Content "$st\cinepulseai.log" }
+          python build_exe.py --validate-zip dist\CinePulseAI-Setup.zip
+          $pkg = Join-Path $env:RUNNER_TEMP "pkg"
+          New-Item -ItemType Directory -Force $pkg | Out-Null
+          tar -xf dist\CinePulseAI-Setup.zip -C $pkg
+          if (-not (Test-Path "$pkg\CinePulseAI\CinePulseAI.exe")) { throw "CinePulseAI.exe missing after unzip" }
+          Get-ChildItem "$pkg\CinePulseAI" | Select-Object Name | Format-Table -HideTableHeaders
+
+      - name: Self-test the unzipped app (imports, ffmpeg, face model, Whisper, a real clip, an avatar video, the app page)
+        shell: pwsh
+        run: |
+          $app = Join-Path $env:RUNNER_TEMP "pkg\CinePulseAI"
+          $p = Start-Process -FilePath "$app\CinePulseAI.exe" -ArgumentList "--selftest" -Wait -PassThru
+          if (Test-Path "$app\cinepulseai.log") { Get-Content "$app\cinepulseai.log" }
           if ($p.ExitCode -ne 0) { throw "CinePulseAI.exe --selftest failed (exit code $($p.ExitCode))" }
 
-      - name: Smoke test - the exe must start and answer its health check
+      - name: Smoke test - the unzipped exe must start and answer its health check
         shell: pwsh
         run: |
-          $smoke = Join-Path $env:RUNNER_TEMP "smoke"
-          Copy-Item dist\CinePulseAI $smoke -Recurse
-          $proc = Start-Process -FilePath "$smoke\CinePulseAI.exe" -PassThru
+          $app = Join-Path $env:RUNNER_TEMP "pkg\CinePulseAI"
+          $proc = Start-Process -FilePath "$app\CinePulseAI.exe" -PassThru
           $ok = $false
           for ($i = 0; $i -lt 120; $i++) {
             Start-Sleep -Seconds 2
@@ -64,18 +72,15 @@ jobs:
               if ($r.StatusCode -eq 200) { $ok = $true; break }
             } catch { }
           }
-          if (Test-Path "$smoke\cinepulseai.log") { Get-Content "$smoke\cinepulseai.log" -Tail 60 }
+          if (Test-Path "$app\cinepulseai.log") { Get-Content "$app\cinepulseai.log" -Tail 60 }
           Get-Process -Name CinePulseAI -ErrorAction SilentlyContinue | Stop-Process -Force
           if (-not $ok) { throw "CinePulseAI.exe did not start within 4 minutes" }
           Write-Host "Smoke test passed: the exe started and the app answered."
 
-      - name: Make the zip
-        run: python -c "import build_exe, pathlib; print(build_exe.make_zip(pathlib.Path('dist/CinePulseAI'), pathlib.Path('dist/CinePulseAI-Final-Executable.zip')))"
-
       - uses: actions/upload-artifact@v4
         with:
-          name: CinePulseAI-Final-Executable
-          path: dist/CinePulseAI-Final-Executable.zip
+          name: CinePulseAI-Setup
+          path: dist/CinePulseAI-Setup.zip
           retention-days: 14
           compression-level: 0
 
@@ -85,4 +90,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "build-$env:GITHUB_RUN_NUMBER"
-          gh release create $tag "dist/CinePulseAI-Final-Executable.zip" --repo $env:GITHUB_REPOSITORY --title "CinePulse AI build $env:GITHUB_RUN_NUMBER" --notes "Windows build. Download the zip, unzip it, double-click CinePulseAI.exe inside the CinePulseAI folder."
+          gh release create $tag "dist/CinePulseAI-Setup.zip" --repo $env:GITHUB_REPOSITORY --title "CinePulse AI build $env:GITHUB_RUN_NUMBER" --notes "Windows build. Download CinePulseAI-Setup.zip, unzip it, double-click CinePulseAI.exe inside the CinePulseAI folder. No installation and no internet needed for the core features."

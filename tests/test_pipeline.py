@@ -67,7 +67,7 @@ class VugolaTests(unittest.TestCase):
 
     def test_happy_path_uploads_every_clip(self):
         seen = []
-        with mock.patch.object(ve, "upload_to_google_drive", return_value="https://drive/x") as up:
+        with mock.patch.object(pipeline, "upload_to_google_drive", return_value="https://drive/x") as up:
             res = self.run_pipeline("v1", progress=lambda s, f: seen.append((s, f)))
         self.assertGreaterEqual(len(res["clips"]), 1)
         self.assertEqual(up.call_count, len(res["clips"]))
@@ -86,7 +86,7 @@ class VugolaTests(unittest.TestCase):
 
     def test_url_is_downloaded_first(self):
         with mock.patch.object(pipeline, "download_media", return_value=self.src) as dl, mock.patch.object(
-            ve, "upload_to_google_drive", return_value="L"
+            pipeline, "upload_to_google_drive", return_value="L"
         ):
             self.run_pipeline("v2", source="https://youtu.be/abc")
         self.assertEqual(dl.call_args[0][0], "https://youtu.be/abc")
@@ -98,7 +98,7 @@ class VugolaTests(unittest.TestCase):
     def test_no_folder_skips_upload_with_warning(self):
         env = {k: v for k, v in os.environ.items() if k != "GOOGLE_DRIVE_FOLDER_ID"}
         with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
-            ve, "upload_to_google_drive"
+            pipeline, "upload_to_google_drive"
         ) as up:
             res = self.run_pipeline("v4", folder="")
         up.assert_not_called()
@@ -106,7 +106,7 @@ class VugolaTests(unittest.TestCase):
         self.assertTrue(all(c["drive_link"] is None and c["output_path"] for c in res["clips"]))
 
     def test_upload_failure_is_recorded_not_raised(self):
-        with mock.patch.object(ve, "upload_to_google_drive", side_effect=RuntimeError("drive down")):
+        with mock.patch.object(pipeline, "upload_to_google_drive", side_effect=RuntimeError("drive down")):
             res = self.run_pipeline("v5")
         for clip in res["clips"]:
             self.assertIn("drive down", clip["error"])
