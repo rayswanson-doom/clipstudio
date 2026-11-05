@@ -594,7 +594,7 @@ def render_lab_tab(folder_id: str) -> None:
                  ("Yes" if result.get("drive_link") else "No", "Backed up to Drive")]
         if avatar:
             tiles.append(({"mouth-warp": "Mouth sync", "3d": "3D"}.get(avatar["mode"], "Pulse"), "Avatar animation"))
-            if avatar.get("layout"):
+            if isinstance(avatar.get("layout"), dict):
                 tiles.append((avatar["layout"]["preset"], "Avatar position"))
             if avatar.get("gestures"):
                 tiles.append((len(avatar["gestures"]), "Gestures played"))

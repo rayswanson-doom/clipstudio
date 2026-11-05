@@ -307,6 +307,14 @@ class ViewmaxTabTests(unittest.TestCase):
         for needle in ("Avatar position", "Top-Right", "Gestures played"):
             self.assertIn(needle, text)
 
+    def test_legacy_card_layout_string_does_not_crash_the_tiles(self):
+        res = {**VIEWMAX, "avatar": {"mode": "mouth-warp", "layout": "full"}}
+        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=res):
+            f = run_app(FakeSt({"viewmax_prompt": "p"}, clicked=["viewmax_run"]))
+        text = " ".join(str(c) for c in f.names("markdown"))
+        self.assertIn("Mouth sync", text)
+        self.assertNotIn("Avatar position", text)
+
     def test_avatar_result_badge(self):
         res = {**VIEWMAX, "avatar": {"mode": "pulse"}}
         with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=res):
