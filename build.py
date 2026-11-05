@@ -45,7 +45,8 @@ ROOT = Path(__file__).resolve().parent
 APP_NAME = "CinePulseAI"
 
 BACKEND_MODULES = ["pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine", "avatar_sync",
-                   "ocr_engine", "visual_cues"]
+                   "ocr_engine", "visual_cues", "avatar_3d_engine", "glb_model", "soft_raster", "lipsync_en",
+                   "avatar_gestures", "demo_avatars"]
 REQUIRED_SOURCES = [
     "launcher.py", "selftest.py", "frontend/app.py",
     *[f"backend/{m}.py" for m in BACKEND_MODULES],
@@ -63,6 +64,9 @@ EXTRA_COLLECT_ALL = [
 ]
 # PaddleOCR itself is huge (~540 MB) and conflicts with opencv-python, so it is opt-in: build_exe.py --with-paddleocr
 PADDLE_COLLECT_ALL = ["paddleocr", "paddle", "paddlex"]
+# PyTorch is NOT used by the 3-D avatar renderer (numpy + OpenCV) or by anything else in the app, and it adds
+# ~1-2 GB, so it is opt-in: build_exe.py --with-torch (for people who add torch-based avatar models later).
+TORCH_COLLECT_ALL = ["torch", "torchvision"]
 PIP_NAMES = {  # import name -> pip package name, where they differ
     "cv2": "opencv-python",
     "googleapiclient": "google-api-python-client",
@@ -224,7 +228,7 @@ def fetch_whisper_model(root: Path = ROOT) -> bool:
 # 3. PyInstaller
 # --------------------------------------------------------------------------- #
 def build_pyinstaller_args(root: Path = ROOT, dist: Optional[Path] = None, work: Optional[Path] = None,
-                           with_paddleocr: bool = False) -> List[str]:
+                           with_paddleocr: bool = False, with_torch: bool = False) -> List[str]:
     dist = dist or root / "dist"
     work = work or root / "build"
     sep = os.pathsep  # ';' on Windows, ':' elsewhere - what --add-data expects
@@ -246,6 +250,11 @@ def build_pyinstaller_args(root: Path = ROOT, dist: Optional[Path] = None, work:
         for pkg in PADDLE_COLLECT_ALL:
             args += ["--collect-all", pkg]
         args += ["--hidden-import", "paddleocr"]
+    if with_torch:
+        for pkg in TORCH_COLLECT_ALL:
+            if _has_module(pkg):
+                args += ["--collect-all", pkg]
+        args += ["--hidden-import", "torch"]
     for pkg in COPY_METADATA:
         args += ["--copy-metadata", pkg]
     for mod in HIDDEN_IMPORTS:

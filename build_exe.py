@@ -2,10 +2,11 @@
 build_exe.py  -  build the CinePulse AI Windows distribution with PyInstaller.
 
     python build_exe.py --dry-run     # scan + show the PyInstaller arguments, build nothing
-    python build_exe.py               # build dist/CinePulseAI/ and dist/CinePulseAI-Portable.zip
+    python build_exe.py               # build dist/CinePulseAI/ and dist/CinePulseAI-3D-Studio-Portable.zip
     python build_exe.py --ci          # same, for an unattended CI machine
     python build_exe.py --git-push    # ...then `git add .`, `git commit`, `git push origin main`
     python build_exe.py --git-only    # only the git step (no build)
+    python build_exe.py --with-torch       # also bundle PyTorch (+1-2 GB; not needed by the built-in 3-D renderer)
     python build_exe.py --with-paddleocr   # also bundle PaddleOCR itself (+~540 MB, see below)
 
 Must run on WINDOWS (PyInstaller cannot cross-compile). No manual setup is
@@ -46,8 +47,9 @@ from typing import List, Optional
 import build  # shared constants, preflight scan and helpers
 
 ROOT = Path(__file__).resolve().parent
-ZIP_NAME = "CinePulseAI-Portable.zip"
-COMMIT_MESSAGE = "feat: add OCR frame text reading, custom script narration, and automated build package"
+ZIP_NAME = "CinePulseAI-3D-Studio-Portable.zip"
+COMMIT_MESSAGE = ("feat: add 3D avatar body motion, pose control, podcast corner positioning for human/anime "
+                  "models, and automated build")
 COMMIT_TRAILERS = (
     "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>",
     "Claude-Session: https://claude.ai/code/session_01DZZzH74mQWkTiSWum5df7Q",
@@ -132,9 +134,9 @@ def ensure_blazeface(root: Path = ROOT, allow_download: bool = True) -> bool:
 # --------------------------------------------------------------------------- #
 # PyInstaller
 # --------------------------------------------------------------------------- #
-def pyinstaller_args(root: Path = ROOT, with_paddleocr: bool = False) -> List[str]:
+def pyinstaller_args(root: Path = ROOT, with_paddleocr: bool = False, with_torch: bool = False) -> List[str]:
     """build.py's arguments plus --add-data for models/ and bin/."""
-    args = build.build_pyinstaller_args(root, with_paddleocr=with_paddleocr)
+    args = build.build_pyinstaller_args(root, with_paddleocr=with_paddleocr, with_torch=with_torch)
     sep = build.os.pathsep
     extra: List[str] = []
     for folder in ("models", "bin"):
@@ -179,6 +181,7 @@ def finalize(app_dir: Path, root: Path = ROOT, include_token: bool = True) -> Li
         "There is no console window: use 'Quit CinePulse AI' in the sidebar to stop it.\n"
         "If nothing opens, read cinepulseai.log in this folder.\n\n"
         "Works offline: transcription, highlight scoring, face-tracked cropping, AI avatar lip-sync,\n"
+        "3D avatars (.glb / .vrm: phoneme lip-sync, head + upper-body gestures) shown in a podcast corner frame,\n"
         "merging, and reading on-screen text (OCR). Needs internet: YouTube downloads, edge-tts voices, Google Drive backup.\n\n"
         "GOOGLE DRIVE AUTO-BACKUP (optional)\n"
         "  The app runs fine without it - everything is saved in the 'outputs' folder here.\n"
@@ -248,7 +251,8 @@ def validate_zip(zip_path: Path, top: Optional[str] = None) -> List[str]:
         if app_py:
             text = zf.read(app_py).decode("utf-8", "replace")
             for needle in ("CinePulse AI", "Clip Repurposer Studio", "AI Generator Lab",
-                           "Enable AI Avatar Lip-Sync Commentary", "Your own script", "Visual actions"):
+                           "Enable AI Avatar Lip-Sync Commentary", "Your own script", "Visual actions",
+                           "Model type", "Avatar position"):
                 if needle not in text:
                     problems.append(f"frontend/app.py in the zip lacks '{needle}'")
         if not any(n.startswith(f"{top}/") for n in names):
@@ -326,6 +330,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--allow-non-windows", action="store_true", help="permit a test build off Windows")
     ap.add_argument("--no-zip", action="store_true", help="do not create the final zip")
     ap.add_argument("--with-paddleocr", action="store_true", help="also bundle PaddleOCR (+~540 MB; default is RapidOCR)")
+    ap.add_argument("--with-torch", action="store_true", help="also bundle PyTorch (+1-2 GB; the 3-D avatar renderer does not need it)")
     ap.add_argument("--git-push", action="store_true", help="after a successful build: git add ., commit, push origin main")
     ap.add_argument("--git-only", action="store_true", help="only run the git add/commit/push step")
     ap.add_argument("--validate-zip", metavar="ZIP", help="only check an existing final zip, then exit")
@@ -347,7 +352,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     report = build.preflight(ROOT, include_token, a.require_token, False, a.allow_non_windows)
     print(report.render())
-    args = pyinstaller_args(ROOT, a.with_paddleocr)
+    args = pyinstaller_args(ROOT, a.with_paddleocr, a.with_torch)
     if a.dry_run:
         print("\nPyInstaller.__main__.run([\n  " + ",\n  ".join(repr(x) for x in args) + "\n])")
         return 0 if report.ok else 1

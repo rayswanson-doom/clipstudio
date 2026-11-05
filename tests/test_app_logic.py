@@ -74,6 +74,10 @@ class FakeSt:
         self._log("slider", label, key=key)
         return self.inputs.get(key, value)
 
+    def number_input(self, label, mn=None, mx=None, value=None, key=None, **k):
+        self._log("number_input", label, key=key)
+        return self.inputs.get(key, value)
+
     def checkbox(self, label, value=False, key=None, **k):
         self._log("checkbox", label, key=key)
         return self.inputs.get(key, value)
@@ -232,7 +236,7 @@ class ViewmaxTabTests(unittest.TestCase):
         boxes = [c for c in f.names("checkbox") if c[2]["key"] == "viewmax_avatar_on"]
         self.assertEqual(boxes[0][1][0], "Enable AI Avatar Lip-Sync Commentary")
         up = [c for c in f.names("file_uploader") if c[2]["key"] == "viewmax_avatar"]
-        self.assertEqual(up[0][2]["type"], ["jpg", "jpeg", "png"])
+        self.assertEqual(up[0][2]["type"], ["glb", "vrm", "jpg", "jpeg", "png"])
 
     def test_avatar_off_sends_no_avatar_args(self):
         with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
@@ -250,11 +254,58 @@ class ViewmaxTabTests(unittest.TestCase):
         self.assertTrue(kw["avatar_enabled"])
         self.assertTrue(kw["avatar_image"].endswith("me.png"))
 
-    def test_avatar_on_without_picture_warns(self):
-        with mock.patch.object(pipeline, "run_viewmax_pipeline") as rv:
-            f = run_app(FakeSt({"viewmax_prompt": "p", "viewmax_avatar_on": True}, clicked=["viewmax_run"]))
-        rv.assert_not_called()
-        self.assertTrue(any("avatar" in c[1][0].lower() for c in f.names("warning")))
+    def test_avatar_on_without_file_uses_the_builtin_3d_avatar(self):
+        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
+            run_app(FakeSt({"viewmax_prompt": "p", "viewmax_avatar_on": True, "viewmax_model_type": "Anime"},
+                           clicked=["viewmax_run"]))
+        kw = rv.call_args[1]
+        self.assertEqual((kw["avatar_image"], kw["avatar_type"]), ("demo:anime", "anime"))
+
+    def test_podcast_layout_controls_exist_and_are_forwarded(self):
+        f = run_app(FakeSt())
+        labels = [c[1][0] for c in f.names("selectbox")]
+        for needle in ("Model type", "Avatar position", "Render quality"):
+            self.assertTrue(any(needle in l for l in labels), needle)
+        sel = [c for c in f.names("selectbox") if c[2]["key"] == "viewmax_model_type"]
+        self.assertTrue(sel)
+        up = FakeUpload()
+        up.name = "host.glb"
+        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
+            run_app(FakeSt({"viewmax_prompt": "p", "viewmax_avatar_on": True, "viewmax_avatar": up,
+                            "viewmax_model_type": "Photorealistic Human", "viewmax_position": "Top-Left",
+                            "viewmax_scale": 30, "viewmax_gestures": False,
+                            "viewmax_quality": "Fast (low-spec laptops)"}, clicked=["viewmax_run"]))
+        kw = rv.call_args[1]
+        self.assertTrue(kw["avatar_image"].endswith("host.glb"))
+        self.assertEqual((kw["avatar_type"], kw["avatar_position"], kw["avatar_scale"], kw["avatar_gestures"],
+                          kw["avatar_quality"]), ("human", "Top-Left", 0.30, False, "fast"))
+        self.assertNotIn("avatar_xy", kw)
+
+    def test_custom_coordinates_show_x_y_and_are_forwarded(self):
+        inputs = {"viewmax_prompt": "p", "viewmax_avatar_on": True, "viewmax_position": "Custom Coordinates",
+                  "viewmax_x": 120, "viewmax_y": 800}
+        f = run_app(FakeSt(inputs))
+        self.assertEqual({c[2]["key"] for c in f.names("number_input")}, {"viewmax_x", "viewmax_y"})
+        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
+            run_app(FakeSt(inputs, clicked=["viewmax_run"]))
+        self.assertEqual(rv.call_args[1]["avatar_xy"], (120, 800))
+
+    def test_x_y_hidden_for_corner_presets(self):
+        f = run_app(FakeSt({"viewmax_avatar_on": True, "viewmax_position": "Bottom-Left"}))
+        self.assertEqual(f.names("number_input"), [])
+
+    def test_layout_preview_is_shown_only_when_the_avatar_is_on(self):
+        self.assertFalse(any("Layout preview" in str(c) for c in run_app(FakeSt()).names("image")))
+        f = run_app(FakeSt({"viewmax_avatar_on": True}))
+        self.assertTrue(any("Layout preview" in str(c) for c in f.names("image")))
+
+    def test_3d_result_tiles(self):
+        res = {**VIEWMAX, "avatar": {"mode": "3d", "layout": {"preset": "Top-Right"}, "gestures": [{"name": "wave"}]}}
+        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=res):
+            f = run_app(FakeSt({"viewmax_prompt": "p"}, clicked=["viewmax_run"]))
+        text = " ".join(str(c) for c in f.names("markdown"))
+        for needle in ("Avatar position", "Top-Right", "Gestures played"):
+            self.assertIn(needle, text)
 
     def test_avatar_result_badge(self):
         res = {**VIEWMAX, "avatar": {"mode": "pulse"}}

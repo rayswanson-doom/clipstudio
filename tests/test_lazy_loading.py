@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-HEAVY = ["faster_whisper", "ctranslate2", "mediapipe", "paddleocr", "paddle", "rapidocr_onnxruntime", "onnxruntime"]
+HEAVY = ["torch", "torchvision", "faster_whisper", "ctranslate2", "mediapipe", "paddleocr", "paddle", "rapidocr_onnxruntime", "onnxruntime"]
 
 
 class LazyLoadingTests(unittest.TestCase):
@@ -13,12 +13,25 @@ class LazyLoadingTests(unittest.TestCase):
         code = (
             "import sys; sys.path.insert(0, 'backend')\n"
             "import pipeline, transcriber, video_engine, avatar_sync, ocr_engine, visual_cues, scorer, tts_engine\n"
+            "import avatar_3d_engine, glb_model, soft_raster, lipsync_en, avatar_gestures, demo_avatars\n"
             f"bad = [m for m in {HEAVY!r} if m in sys.modules]\n"
             "print('LOADED:' + ','.join(bad))\n"
         )
         out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True, timeout=120)
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(out.stdout.strip().splitlines()[-1], "LOADED:")
+
+    def test_3d_render_needs_no_heavy_engine(self):
+        code = (
+            "import sys, tempfile; sys.path.insert(0, 'backend')\n"
+            "import demo_avatars, avatar_3d_engine as e\n"
+            "p = demo_avatars.ensure_demo_avatars(tempfile.mkdtemp())['human']\n"
+            "m = e.G.load_model(p); r = e.Rig(m); R = e.Renderer(m, r, (96, 128), 'human', 1.0, 'bust')\n"
+            "R.render(r.solve(e.Pose()), {})\n"
+            f"print('LOADED:' + ','.join(x for x in {HEAVY!r} if x in sys.modules))\n"
+        )
+        out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True, timeout=180)
+        self.assertEqual(out.stdout.strip().splitlines()[-1] if out.stdout.strip() else out.stderr[-500:], "LOADED:")
 
     def test_availability_checks_do_not_import(self):
         code = (

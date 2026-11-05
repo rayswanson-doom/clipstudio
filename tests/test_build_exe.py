@@ -272,7 +272,7 @@ class MainTests(unittest.TestCase):
             self.assertNotIn("WARNING: ffmpeg", out.getvalue())
             self.assertIn("Zip validation passed", out.getvalue())
             self.assertEqual(build_exe.validate_zip(z), [])
-            self.assertEqual(build_exe.ZIP_NAME, "CinePulseAI-Portable.zip")
+            self.assertEqual(build_exe.ZIP_NAME, "CinePulseAI-3D-Studio-Portable.zip")
 
     def test_errors_stop_before_pyinstaller(self):
         with tempfile.TemporaryDirectory() as d:
@@ -399,7 +399,7 @@ class GitPublishTests(unittest.TestCase):
         self.assertTrue(r["committed"] and r["pushed"])
         self.assertIn("a.py", r["files"])
         log = self.remote_log()
-        self.assertTrue(log.startswith("feat: add OCR frame text reading, custom script narration, and automated build package"))
+        self.assertTrue(log.startswith("feat: add 3D avatar body motion, pose control, podcast corner positioning for human/anime models, and automated build"))
         self.assertIn("Claude-Session:", log)
 
     def test_second_run_with_nothing_new_does_not_fail_or_commit(self):
@@ -464,6 +464,18 @@ class PackagingContentsTests(unittest.TestCase):
         for folder in ("frontend", "models", "bin"):
             self.assertTrue(any(d.endswith(f"{os.pathsep}{folder}") for d in datas), (folder, datas))
         self.assertTrue(args[-1].endswith("launcher.py"))
+
+    def test_3d_modules_are_bundled_and_torch_is_opt_in(self):
+        for m in ("avatar_3d_engine", "glb_model", "soft_raster", "lipsync_en", "avatar_gestures", "demo_avatars"):
+            self.assertIn(f"backend/{m}.py", build.REQUIRED_SOURCES)
+            self.assertTrue((ROOT / "backend" / f"{m}.py").is_file())
+            self.assertIn(m, build_exe.pyinstaller_args(ROOT))
+        self.assertNotIn("torch", build_exe.pyinstaller_args(ROOT))
+        on = build_exe.pyinstaller_args(ROOT, with_torch=True)
+        self.assertIn("torch", on)
+        args = build_exe.pyinstaller_args(ROOT)
+        self.assertIn("--onedir", args)
+        self.assertIn("--noconsole", args)
 
     def test_avatar_module_is_a_required_source_and_exists(self):
         self.assertIn("backend/avatar_sync.py", build.REQUIRED_SOURCES)

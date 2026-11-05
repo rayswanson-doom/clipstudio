@@ -25,6 +25,8 @@ from typing import Callable, Optional
 
 try:  # package import (backend.pipeline) or plain module (pipeline)
     from .avatar_sync import create_avatar_video, load_avatar
+    from . import avatar_3d_engine
+    from . import demo_avatars
     from . import ocr_engine
     from . import transcriber as _transcriber_mod
     from .visual_cues import apply_cues_to_video, has_effects
@@ -32,9 +34,11 @@ try:  # package import (backend.pipeline) or plain module (pipeline)
     from .transcriber import transcribe_audio
     from .tts_engine import DEFAULT_VOICE, generate_voiceover
     from .uploader import DriveBackup, download_media, drive_status, upload_to_google_drive
-    from .video_engine import create_vertical_short, merge_audio_with_video
+    from .video_engine import create_vertical_short, merge_audio_with_video, normalize_position_preset, place_podcast_avatar, PIP_PRESETS
 except ImportError:  # pragma: no cover
     from avatar_sync import create_avatar_video, load_avatar
+    import avatar_3d_engine
+    import demo_avatars
     import ocr_engine
     import transcriber as _transcriber_mod
     from visual_cues import apply_cues_to_video, has_effects
@@ -42,7 +46,7 @@ except ImportError:  # pragma: no cover
     from transcriber import transcribe_audio
     from tts_engine import DEFAULT_VOICE, generate_voiceover
     from uploader import DriveBackup, download_media, drive_status, upload_to_google_drive
-    from video_engine import create_vertical_short, merge_audio_with_video
+    from video_engine import create_vertical_short, merge_audio_with_video, normalize_position_preset, place_podcast_avatar, PIP_PRESETS
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +264,55 @@ def _media_seconds(path: str) -> float:
         cap.release()
 
 
+def _podcast_commentary(avatar_image, avatar_type, script, audio_path, out_name, out_dir, background_video,
+                       position, xy, scale, gestures, quality, audio_source, ffmpeg_path, progress, warnings):
+    """Voiceover + background -> base video; avatar (3-D model or picture) -> avatar video; avatar placed in a
+    corner / at X,Y in a rounded podcast frame. Falls back to the plain base video if anything in the avatar
+    chain fails, so the user always gets a video. Returns (video_path, avatar_info or None)."""
+    position = position or "Bottom-Right"
+    _emit(progress, "Preparing the video", 0.40)
+    base = out_name + ".base.mp4"
+    merge_audio_with_video(audio_path, base, background_video=background_video, ffmpeg_path=ffmpeg_path)
+    avatar_clip = out_name + ".avatar.mp4"
+    try:
+        model = avatar_image
+        if str(avatar_image).startswith("demo:"):
+            style = str(avatar_image).split(":", 1)[1] or "human"
+            model = demo_avatars.ensure_demo_avatars(str(Path(out_dir) / "avatars"))[style if style in demo_avatars.DEMO_STYLES else "human"]
+            avatar_type = style if style in demo_avatars.DEMO_STYLES else avatar_type
+        is_model = Path(str(model)).suffix.lower() in avatar_3d_engine.MODEL_EXTENSIONS
+        label = "Animating the 3D avatar" if is_model else "Animating the avatar (lip-sync)"
+        _emit(progress, label, 0.45)
+        cb = lambda f: _emit(progress, label, 0.45 + 0.30 * f)  # noqa: E731
+        if is_model:
+            actual = _media_seconds(audio_path)
+            notes = [{"start": c["start"], "text": c["text"]}
+                     for c in align_cues(script["cues"], script["estimated_seconds"], actual) if c.get("effect") == "none"]
+            info = avatar_3d_engine.create_3d_avatar_video(
+                model, audio_path, avatar_clip, text=script["script"], notes=notes, style=avatar_type,
+                gestures=gestures, quality=quality, ffmpeg_path=ffmpeg_path, progress=cb)
+        else:
+            info = create_avatar_video(model, audio_path, avatar_clip, auto_words=True, size=(480, 640),
+                                       ffmpeg_path=ffmpeg_path, progress=cb)
+        warnings.extend(info.get("warnings", []))
+        _emit(progress, "Placing the avatar in the podcast frame", 0.80)
+        placed = place_podcast_avatar(base, avatar_clip, position, xy, scale, output_path=out_name,
+                                      audio_source=audio_source, ffmpeg_path=ffmpeg_path)
+        info["layout"] = {"preset": placed["preset"], "rect": placed["rect"], "scale": placed["scale"]}
+        return placed["output_path"], info
+    except Exception as exc:  # the voiceover + background video is still worth having
+        logger.warning("podcast avatar failed: %s", exc)
+        warnings.append(f"The avatar could not be added ({exc}); made a plain video instead.")
+        _remove(out_name)
+        os.replace(base, out_name)
+        base = None
+        return out_name, None
+    finally:
+        _remove(avatar_clip)
+        if base:
+            _remove(base)
+
+
 def run_viewmax_pipeline(
     prompt: str,
     folder_id: Optional[str],
@@ -274,8 +327,23 @@ def run_viewmax_pipeline(
     action_prompt: Optional[str] = None,
     read_background_text: bool = False,
     keep_models: bool = False,
+    avatar_type: str = "human",
+    avatar_position: Optional[str] = None,
+    avatar_xy: Optional[tuple] = None,
+    avatar_scale: float = 0.36,
+    avatar_gestures: bool = True,
+    avatar_quality: str = "balanced",
+    avatar_audio: str = "base",
 ) -> dict:
     """Prompt / your own script -> voiceover -> video (+ avatar, + visual action cues) -> Drive.
+
+    avatar_image          a picture (.jpg/.png: 2-D lip-sync), a 3-D model (.glb/.vrm: phoneme lip-sync + body
+                          gestures) or "demo:human" / "demo:ai" / "demo:anime" for the built-in 3-D avatars
+    avatar_type           "human" | "ai" | "anime"  (3-D: lighting / shading style)
+    avatar_position       "Bottom-Right" | "Bottom-Left" | "Top-Right" | "Top-Left" | "Custom Coordinates" -> podcast
+                          picture-in-picture over the video (video_engine.place_podcast_avatar). None keeps the
+                          older full-card layout for picture avatars; 3-D models always use the podcast layout.
+    avatar_xy             (X, Y) pixels for "Custom Coordinates";  avatar_scale  frame width / video width
 
     custom_script         narrate exactly this text (the prompt is then optional)
     action_prompt         describes what happens on screen ("zoom in on the logo, then pan right");
@@ -288,10 +356,23 @@ def run_viewmax_pipeline(
     """
     if not (prompt or "").strip() and not (custom_script or "").strip():
         raise ValueError("Please enter a prompt first (or paste your own script).")
+    avatar_kind = None
     if avatar_enabled:
         if not avatar_image:
-            raise ValueError("Upload an avatar image (.jpg or .png) to use AI Avatar Lip-Sync.")
-        load_avatar(avatar_image)  # fail fast on a wrong/unreadable file, before any voiceover work
+            raise ValueError("Upload an avatar image (.jpg or .png) or a 3D model (.glb / .vrm) to use the AI avatar.")
+        ext = Path(str(avatar_image)).suffix.lower()
+        if str(avatar_image).startswith("demo:"):
+            avatar_kind = "3d"
+        elif ext in avatar_3d_engine.MODEL_EXTENSIONS:
+            avatar_kind = "3d"
+            avatar_3d_engine.G.load_model(avatar_image)  # fail fast on a damaged / compressed model
+        else:
+            avatar_kind = "image"
+            load_avatar(avatar_image)  # fail fast on a wrong/unreadable file, before any voiceover work
+        if avatar_position is not None:
+            normalize_position_preset(avatar_position)  # fail fast on a typo
+            if normalize_position_preset(avatar_position) == "Custom Coordinates" and not avatar_xy:
+                raise ValueError("Custom Coordinates needs an X and a Y position in pixels.")
     warnings = []
     folder_id = _usable_folder(folder_id, warnings)
     out_dir = Path(output_dir)
@@ -319,7 +400,11 @@ def run_viewmax_pipeline(
 
         out_name = str(out_dir / f"viewmax_{_safe_name(script['topic'], 30)}_{stamp}.mp4")
         video_path, avatar_info = None, None
-        if avatar_enabled:
+        if avatar_enabled and (avatar_kind == "3d" or avatar_position is not None):
+            video_path, avatar_info = _podcast_commentary(
+                avatar_image, avatar_type, script, audio_path, out_name, out_dir, background_video, avatar_position,
+                avatar_xy, avatar_scale, avatar_gestures, avatar_quality, avatar_audio, ffmpeg_path, progress, warnings)
+        elif avatar_enabled:
             _emit(progress, "Animating the avatar (lip-sync)", 0.45)
             try:
                 avatar_info = create_avatar_video(

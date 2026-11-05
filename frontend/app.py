@@ -55,7 +55,9 @@ def _output_dir() -> Path:
 OUTPUT_DIR = _output_dir()
 UPLOAD_DIR = Path(tempfile.gettempdir()) / "cinepulse_uploads"
 VIDEO_TYPES = ["mp4", "mov", "mkv", "webm", "avi"]
-AVATAR_TYPES = ["jpg", "jpeg", "png"]
+AVATAR_TYPES = ["glb", "vrm", "jpg", "jpeg", "png"]  # 3D models first, pictures too
+MODEL_TYPES = {"Photorealistic Human": "human", "AI Model": "ai", "Anime": "anime"}
+QUALITY_CHOICES = {"Balanced": "balanced", "Fast (low-spec laptops)": "fast", "High (slower, smoother edges)": "high"}
 VOICES = [
     "en-US-AriaNeural", "en-US-GuyNeural", "en-US-JennyNeural",
     "en-GB-SoniaNeural", "en-GB-RyanNeural", "en-AU-NatashaNeural", "en-IN-NeerjaNeural",
@@ -443,6 +445,28 @@ def render_clip_tab(folder_id: str) -> None:
 # --------------------------------------------------------------------------- #
 # generator lab
 # --------------------------------------------------------------------------- #
+def render_layout_preview(position: str, xy, scale: float, avatar_file) -> None:
+    """Show where the avatar will sit - the same geometry, frame and shadow as the finished video."""
+    try:
+        import cv2
+        import numpy as np
+        import video_engine
+
+        avatar_frame = None
+        if avatar_file is not None and avatar_file.name.lower().endswith(("jpg", "jpeg", "png")):
+            avatar_frame = cv2.imdecode(np.frombuffer(avatar_file.getvalue(), np.uint8), cv2.IMREAD_COLOR)
+        img, rect = video_engine.preview_layout(position_preset=position, custom_coordinates=xy, scale=scale,
+                                                avatar_frame=avatar_frame)
+        left, right = st.columns([1, 2])
+        with left:
+            st.image(img[:, :, ::-1], caption="Layout preview (1080 x 1920 video)", width=180)
+        with right:
+            x, y, w, h = rect
+            st.markdown(f"**Placement:** {position}  \n**Frame:** {w} x {h} px at X {x}, Y {y}")
+    except Exception as exc:  # a preview must never block the form
+        st.caption(f"Layout preview unavailable ({exc}).")
+
+
 def render_lab_tab(folder_id: str) -> None:
     section_header("AI Generator Lab",
                    "Describe a video. Get a script, a natural voiceover and a finished vertical video.")
@@ -478,25 +502,51 @@ def render_lab_tab(folder_id: str) -> None:
 
     with st.container(border=True):
         st.markdown('<div class="cp-clip-head"><span class="cp-rank">AI Avatar</span>'
-                    + badge("runs on CPU", "ok") + badge("no GPU needed", "time") + '</div>',
+                    + badge("3D · runs on CPU", "ok") + badge("no GPU needed", "time") + '</div>',
                     unsafe_allow_html=True)
         avatar_on = st.checkbox("Enable AI Avatar Lip-Sync Commentary", value=False, key="viewmax_avatar_on",
-                                help="Your avatar picture talks in time with the voiceover.")
+                                help="Your avatar talks in time with the voiceover, in a corner of the video.")
+        model_label = st.selectbox("Model type", list(MODEL_TYPES), key="viewmax_model_type", disabled=not avatar_on,
+                                   help="Sets the look: realistic lighting, a cool AI-model glow, or cel-shaded anime.")
         avatar_file = st.file_uploader(
-            "Avatar picture (.jpg or .png) - a clear, front-facing face works best",
+            "Your model: a 3D file (.glb or .vrm) for body + head motion, or a front-facing picture (.jpg / .png). "
+            "Leave empty to use the built-in 3D avatar.",
             type=AVATAR_TYPES, key="viewmax_avatar", disabled=not avatar_on,
         )
-        if avatar_on and avatar_file is not None:
+        if avatar_on and avatar_file is not None and avatar_file.name.lower().endswith(("jpg", "jpeg", "png")):
             st.image(avatar_file, width=140, caption="Your avatar")
-        st.caption("The mouth follows the voice and closes between words. If no face is found, "
-                   "the whole picture does a gentle talking pulse instead. If you also add a "
-                   "background video, the avatar appears as a card over it.")
+        elif avatar_on and avatar_file is None:
+            st.caption("No file added: the built-in 3D avatar for the chosen model type is used.")
+        pcol1, pcol2 = st.columns(2)
+        with pcol1:
+            position = st.selectbox("Avatar position", list(pipeline.PIP_PRESETS), key="viewmax_position",
+                                    disabled=not avatar_on, help="Which corner of the video the avatar sits in.")
+        with pcol2:
+            scale_pct = st.slider("Avatar size (% of the video width)", 15, 60, 36, key="viewmax_scale",
+                                  disabled=not avatar_on)
+        custom_xy = None
+        if position == "Custom Coordinates":
+            xcol, ycol = st.columns(2)
+            with xcol:
+                cx = st.number_input("X (pixels from the left)", 0, 1080, 40, key="viewmax_x", disabled=not avatar_on)
+            with ycol:
+                cy = st.number_input("Y (pixels from the top)", 0, 1920, 1200, key="viewmax_y", disabled=not avatar_on)
+            custom_xy = (int(cx), int(cy))
+        gcol1, gcol2 = st.columns(2)
+        with gcol1:
+            gestures_on = st.checkbox("Body & head gestures", value=True, key="viewmax_gestures", disabled=not avatar_on,
+                                      help="Nods, hand gestures and breathing chosen from what is being said (3D models).")
+        with gcol2:
+            quality_label = st.selectbox("Render quality", list(QUALITY_CHOICES), key="viewmax_quality",
+                                         disabled=not avatar_on)
+        if avatar_on:
+            render_layout_preview(position, custom_xy, scale_pct / 100.0, avatar_file)
+        st.caption("3D models get phoneme-level lip sync, blinking, breathing, head nods and arm gestures; the "
+                   "video is 1080 x 1920 and the avatar sits in a rounded podcast frame.")
 
     if st.button("Generate video", type="primary", key="viewmax_run"):
         if not prompt.strip() and not custom_script.strip():
             st.warning("Enter a prompt or paste your own script first.")
-        elif avatar_on and avatar_file is None:
-            st.warning("Upload an avatar picture to use AI Avatar Lip-Sync.")
         else:
             callback, bar = make_progress()
             temp = []
@@ -506,10 +556,18 @@ def render_lab_tab(folder_id: str) -> None:
                     bg_path = save_upload(background)
                     temp.append(bg_path)
                 extra = {}
-                if avatar_on and avatar_file is not None:
-                    avatar_path = save_upload(avatar_file)
-                    temp.append(avatar_path)
-                    extra = {"avatar_image": avatar_path, "avatar_enabled": True}
+                if avatar_on:
+                    style = MODEL_TYPES[model_label]
+                    if avatar_file is not None:
+                        avatar_path = save_upload(avatar_file)
+                        temp.append(avatar_path)
+                    else:
+                        avatar_path = f"demo:{style}"
+                    extra = {"avatar_image": avatar_path, "avatar_enabled": True, "avatar_type": style,
+                             "avatar_position": position, "avatar_scale": scale_pct / 100.0,
+                             "avatar_gestures": gestures_on, "avatar_quality": QUALITY_CHOICES[quality_label]}
+                    if custom_xy:
+                        extra["avatar_xy"] = custom_xy
                 if custom_script.strip():
                     extra["custom_script"] = custom_script
                 if action_prompt.strip():
@@ -535,7 +593,11 @@ def render_lab_tab(folder_id: str) -> None:
         tiles = [(script["word_count"], "Words"), (f"{script['estimated_seconds']}s", "Est. length"),
                  ("Yes" if result.get("drive_link") else "No", "Backed up to Drive")]
         if avatar:
-            tiles.append(("Mouth sync" if avatar["mode"] == "mouth-warp" else "Pulse", "Avatar animation"))
+            tiles.append(({"mouth-warp": "Mouth sync", "3d": "3D"}.get(avatar["mode"], "Pulse"), "Avatar animation"))
+            if avatar.get("layout"):
+                tiles.append((avatar["layout"]["preset"], "Avatar position"))
+            if avatar.get("gestures"):
+                tiles.append((len(avatar["gestures"]), "Gestures played"))
         if result.get("cues_applied"):
             tiles.append((result["cues_applied"], "Visual actions"))
         st.markdown(stat_tiles(tiles), unsafe_allow_html=True)

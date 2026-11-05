@@ -448,6 +448,257 @@ def merge_audio_with_video(
     return str(out.resolve())
 
 
+
+# --------------------------------------------------------------------------- #
+# Podcast picture-in-picture: an avatar in a corner of the video
+# --------------------------------------------------------------------------- #
+PIP_PRESETS = ("Bottom-Right", "Bottom-Left", "Top-Right", "Top-Left", "Custom Coordinates")
+PIP_DEFAULT_SCALE = 0.36
+PIP_MIN_SCALE, PIP_MAX_SCALE = 0.10, 0.80
+
+
+def normalize_position_preset(preset: str) -> str:
+    """'bottom right', 'bottom_right', 'BR', 'custom' ... -> one of PIP_PRESETS."""
+    key = "".join(ch for ch in str(preset or "").lower() if ch.isalnum())
+    table = {"bottomright": "Bottom-Right", "br": "Bottom-Right", "bottomleft": "Bottom-Left", "bl": "Bottom-Left",
+             "topright": "Top-Right", "tr": "Top-Right", "topleft": "Top-Left", "tl": "Top-Left",
+             "custom": "Custom Coordinates", "customcoordinates": "Custom Coordinates", "customxy": "Custom Coordinates",
+             "customcoordinatesxypixels": "Custom Coordinates"}
+    if key not in table:
+        raise ValueError(f"Unknown position '{preset}'. Use one of: {', '.join(PIP_PRESETS)}.")
+    return table[key]
+
+
+def compute_pip_rect(base_size: Tuple[int, int], avatar_size: Tuple[int, int], position_preset: str = "Bottom-Right",
+                     custom_coordinates: Optional[Tuple[float, float]] = None, scale: float = PIP_DEFAULT_SCALE,
+                     margin: Optional[int] = None) -> Tuple[int, int, int, int]:
+    """(x, y, w, h) in base-video pixels of the avatar frame.
+
+    scale   the avatar frame's width as a fraction of the base video's width (0.10 - 0.80)
+    Corner presets keep `margin` pixels (default 4 % of the width) from the edges. 'Custom Coordinates'
+    puts the frame's top-left corner at (X, Y) pixels; the frame is pushed back inside the picture
+    if it would stick out."""
+    bw, bh = int(base_size[0]), int(base_size[1])
+    aw, ah = int(avatar_size[0]), int(avatar_size[1])
+    if min(bw, bh, aw, ah) <= 0:
+        raise ValueError("Video sizes must be positive.")
+    preset = normalize_position_preset(position_preset)
+    scale = float(min(max(scale, PIP_MIN_SCALE), PIP_MAX_SCALE))
+    w = max(2, int(round(bw * scale / 2)) * 2)
+    h = max(2, int(round(w * ah / aw / 2)) * 2)
+    if h > bh:  # tall avatar on a short video: fit by height
+        h = max(2, int(bh * 0.9) // 2 * 2)
+        w = max(2, int(round(h * aw / ah / 2)) * 2)
+    m = max(12, int(bw * 0.04)) if margin is None else int(margin)
+    if preset == "Custom Coordinates":
+        if custom_coordinates is None:
+            raise ValueError("Custom Coordinates needs an (X, Y) position in pixels.")
+        x, y = int(round(float(custom_coordinates[0]))), int(round(float(custom_coordinates[1])))
+    else:
+        x = bw - w - m if preset.endswith("Right") else m
+        y = bh - h - m if preset.startswith("Bottom") else m
+    x = int(min(max(x, 0), max(bw - w, 0)))
+    y = int(min(max(y, 0), max(bh - h, 0)))
+    return x, y, w, h
+
+
+def _rounded_rect_mask(w: int, h: int, radius: int, inset: int = 0, canvas: Optional[Tuple[int, int]] = None,
+                       origin: Tuple[int, int] = (0, 0), supersample: int = 3):
+    """Float mask (0..1) of a rounded rectangle, drawn supersampled for smooth corners."""
+    import cv2
+    import numpy as np
+
+    cw, ch = canvas or (w, h)
+    big = np.zeros((ch * supersample, cw * supersample), np.uint8)
+    x0, y0 = (origin[0] + inset) * supersample, (origin[1] + inset) * supersample
+    x1, y1 = (origin[0] + w - inset) * supersample - 1, (origin[1] + h - inset) * supersample - 1
+    r = max(0, int((radius - inset) * supersample))
+    r = min(r, (x1 - x0) // 2, (y1 - y0) // 2)
+    cv2.rectangle(big, (x0 + r, y0), (x1 - r, y1), 255, -1)
+    cv2.rectangle(big, (x0, y0 + r), (x1, y1 - r), 255, -1)
+    for cx, cy in ((x0 + r, y0 + r), (x1 - r, y0 + r), (x0 + r, y1 - r), (x1 - r, y1 - r)):
+        cv2.circle(big, (cx, cy), r, 255, -1)
+    return cv2.resize(big, (cw, ch), interpolation=cv2.INTER_AREA).astype("float32") / 255.0
+
+
+def build_pip_frame_layers(base_size: Tuple[int, int], rect: Tuple[int, int, int, int],
+                           border_color: Tuple[int, int, int] = (255, 255, 255), border_px: Optional[int] = None,
+                           radius: Optional[int] = None, shadow: bool = True):
+    """(decoration RGBA uint8 (bh,bw,4) in BGRA, avatar mask uint8 (h,w)) for the podcast frame.
+
+    The decoration (drop shadow + border ring) is laid UNDER the avatar; the avatar's mask is inset
+    by the border width so the ring stays visible and the avatar's own pixels are never tinted."""
+    import cv2
+    import numpy as np
+
+    bw, bh = base_size
+    x, y, w, h = rect
+    border = max(2, int(round(w * 0.014))) if border_px is None else int(border_px)
+    rad = max(4, int(round(w * 0.075))) if radius is None else int(radius)
+    deco = np.zeros((bh, bw, 4), np.float32)
+    outer = _rounded_rect_mask(w, h, rad, 0, (bw, bh), (x, y))
+    if shadow:
+        blur = max(3, int(w * 0.05)) | 1
+        offset = max(2, int(w * 0.025))
+        sh = np.zeros((bh, bw), np.float32)
+        sx0, sy0 = x + 0, y + offset
+        sh_rect = _rounded_rect_mask(w, h, rad, 0, (bw, bh), (min(sx0, bw - 1), min(sy0, bh - 1)))
+        sh = cv2.GaussianBlur(sh_rect, (0, 0), blur / 2.0) * 0.60
+        deco[..., 3] = sh  # black shadow
+    ring_alpha = np.clip(outer - _rounded_rect_mask(w, h, rad, border, (bw, bh), (x, y)), 0, 1)
+    col = np.array(border_color[::-1], np.float32) / 255.0  # BGR
+    a_old = deco[..., 3:4]
+    a_new = ring_alpha[..., None]
+    out_a = a_new + a_old * (1 - a_new)
+    rgb = (col * a_new + deco[..., :3] * a_old * (1 - a_new)) / np.maximum(out_a, 1e-6)
+    deco[..., :3] = rgb
+    deco[..., 3:4] = out_a
+    mask = _rounded_rect_mask(w, h, rad, border)
+    return (deco * 255.0 + 0.5).astype(np.uint8), (mask * 255.0 + 0.5).astype(np.uint8)
+
+
+def _probe_media(ffmpeg: str, path: str) -> dict:
+    """{'width','height','duration','has_audio','has_video'} from `ffmpeg -i` (no ffprobe needed)."""
+    import re
+
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    proc = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, text=True, creationflags=flags)
+    text = proc.stderr
+    info = {"width": 0, "height": 0, "duration": 0.0, "has_audio": "Audio:" in text, "has_video": "Video:" in text}
+    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
+    if m:
+        info["duration"] = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    v = re.search(r"Video:.*?,\s*(\d{2,5})x(\d{2,5})", text)
+    if v:
+        info["width"], info["height"] = int(v.group(1)), int(v.group(2))
+    return info
+
+
+def build_pip_command(ffmpeg: str, base: str, avatar: str, deco_png: str, mask_png: str, out: str,
+                      rect: Tuple[int, int, int, int], duration: float, audio_source: str, has_avatar_audio: bool,
+                      has_base_audio: bool) -> List[str]:
+    x, y, w, h = rect
+    chain = (
+        f"[1:v]scale={w}:{h},setsar=1,format=yuva420p[av0];[3:v]format=gray[m];[av0][m]alphamerge[av];"
+        f"[0:v][2:v]overlay=0:0:format=auto[b];[b][av]overlay={x}:{y}:format=auto:eof_action=repeat,format=yuv420p[v]"
+    )
+    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", base, "-i", avatar,
+           "-loop", "1", "-framerate", "30", "-i", deco_png, "-loop", "1", "-framerate", "30", "-i", mask_png]
+    amap: List[str]
+    if audio_source == "mix" and has_base_audio and has_avatar_audio:
+        chain += ";[0:a]volume=0.55[ba];[1:a]volume=1.0[aa];[ba][aa]amix=inputs=2:duration=first:normalize=0[a]"
+        amap = ["-map", "[a]"]
+    elif audio_source == "avatar" and has_avatar_audio:
+        amap = ["-map", "1:a:0"]
+    elif has_base_audio:
+        amap = ["-map", "0:a:0"]
+    elif has_avatar_audio:
+        amap = ["-map", "1:a:0"]
+    else:
+        amap = []
+    cmd += ["-filter_complex", chain, "-map", "[v]", *amap,
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
+    if amap:
+        cmd += ["-c:a", "aac", "-b:a", "192k"]
+    cmd += ["-t", f"{duration:.3f}", "-movflags", "+faststart", out]
+    return cmd
+
+
+def place_podcast_avatar(
+    base_video: str,
+    avatar_video: str,
+    position_preset: str = "Bottom-Right",
+    custom_coordinates: Optional[Tuple[float, float]] = None,
+    scale: float = PIP_DEFAULT_SCALE,
+    output_path: Optional[str] = None,
+    audio_source: str = "base",
+    border_color: Tuple[int, int, int] = (255, 255, 255),
+    shadow: bool = True,
+    ffmpeg_path: Optional[str] = None,
+) -> dict:
+    """Picture-in-picture "podcast" layout: the avatar video in a rounded, bordered, shadowed frame
+    in a corner (or at exact pixel coordinates) of the base video.
+
+    position_preset    "Bottom-Right" | "Bottom-Left" | "Top-Right" | "Top-Left" | "Custom Coordinates"
+    custom_coordinates (X, Y) pixels of the frame's top-left corner, used with "Custom Coordinates"
+    scale              frame width as a fraction of the base video's width (0.10 - 0.80)
+    audio_source       "base" (default) | "avatar" | "mix" - which soundtrack the result keeps
+    The output is as long as the base video (a shorter avatar holds its last frame).
+    Returns {"output_path","rect":(x,y,w,h),"preset","scale","base_size","duration"}."""
+    for label, path in (("Base video", base_video), ("Avatar video", avatar_video)):
+        if not Path(path).is_file():
+            raise FileNotFoundError(f"{label} not found: {path}")
+    if audio_source not in ("base", "avatar", "mix"):
+        raise ValueError("audio_source must be 'base', 'avatar' or 'mix'.")
+    preset = normalize_position_preset(position_preset)
+    ffmpeg = find_ffmpeg(ffmpeg_path)
+    b, a = _probe_media(ffmpeg, base_video), _probe_media(ffmpeg, avatar_video)
+    if not b["has_video"] or b["width"] <= 0:
+        raise RuntimeError("The base video could not be read.")
+    if not a["has_video"] or a["width"] <= 0:
+        raise RuntimeError("The avatar video could not be read.")
+    rect = compute_pip_rect((b["width"], b["height"]), (a["width"], a["height"]), preset, custom_coordinates, scale)
+    out = Path(output_path) if output_path else Path(base_video).with_name(Path(base_video).stem + "_podcast.mp4")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    duration = b["duration"] or a["duration"]
+    import cv2
+
+    with tempfile.TemporaryDirectory(prefix="pip_") as tmp:
+        deco, mask = build_pip_frame_layers((b["width"], b["height"]), rect, border_color, shadow=shadow)
+        deco_png, mask_png = os.path.join(tmp, "deco.png"), os.path.join(tmp, "mask.png")
+        cv2.imwrite(deco_png, deco)
+        cv2.imwrite(mask_png, mask)
+        cmd = build_pip_command(ffmpeg, str(base_video), str(avatar_video), deco_png, mask_png, str(out), rect,
+                                duration, audio_source, a["has_audio"], b["has_audio"])
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        proc = subprocess.run(cmd, capture_output=True, text=True, creationflags=flags)
+    if proc.returncode != 0 or not out.is_file():
+        if out.is_file():
+            out.unlink()
+        raise RuntimeError(f"ffmpeg could not place the avatar ({proc.returncode}): {proc.stderr[-800:]}")
+    return {"output_path": str(out.resolve()), "rect": rect, "preset": preset, "scale": float(scale),
+            "base_size": (b["width"], b["height"]), "duration": round(duration, 2)}
+
+
+def preview_layout(base_size: Tuple[int, int] = OUTPUT_SIZE, avatar_size: Tuple[int, int] = (480, 640),
+                   position_preset: str = "Bottom-Right", custom_coordinates: Optional[Tuple[float, float]] = None,
+                   scale: float = PIP_DEFAULT_SCALE, base_frame=None, avatar_frame=None, thumb_height: int = 480):
+    """A small BGR picture of where the avatar will sit - drawn with the SAME geometry, frame, border
+    and shadow as the real render. `base_frame` / `avatar_frame` (BGR arrays) make it a true preview;
+    without them a placeholder backdrop and a silhouette are drawn."""
+    import cv2
+    import numpy as np
+
+    bw, bh = int(base_size[0]), int(base_size[1])
+    rect = compute_pip_rect((bw, bh), avatar_size, position_preset, custom_coordinates, scale)
+    k = thumb_height / bh
+    tw, th = max(2, int(round(bw * k))), thumb_height
+    small_rect = tuple(int(round(v * k)) for v in rect)
+    x, y, w, h = small_rect
+    if base_frame is not None:
+        canvas = cv2.resize(base_frame, (tw, th), interpolation=cv2.INTER_AREA)
+    else:
+        t = np.linspace(0, 1, th, dtype=np.float32)[:, None, None]
+        canvas = (np.array((70, 52, 40), np.float32) * (1 - t) + np.array((40, 30, 22), np.float32) * t)
+        canvas = np.broadcast_to(canvas, (th, tw, 3)).astype(np.uint8).copy()
+        for gx in range(1, 3):  # thirds grid so the position reads clearly
+            cv2.line(canvas, (tw * gx // 3, 0), (tw * gx // 3, th), (95, 80, 66), 1)
+            cv2.line(canvas, (0, th * gx // 3), (tw, th * gx // 3), (95, 80, 66), 1)
+    deco, mask = build_pip_frame_layers((tw, th), small_rect)
+    if avatar_frame is not None:
+        tile = cv2.resize(avatar_frame, (w, h), interpolation=cv2.INTER_AREA)
+    else:
+        tile = np.full((h, w, 3), (88, 64, 52), np.uint8)
+        cv2.circle(tile, (w // 2, int(h * 0.36)), int(w * 0.17), (190, 190, 215), -1)
+        cv2.ellipse(tile, (w // 2, int(h * 1.02)), (int(w * 0.34), int(h * 0.38)), 0, 180, 360, (190, 190, 215), -1)
+    a = deco[..., 3:4].astype(np.float32) / 255.0
+    canvas = (canvas.astype(np.float32) * (1 - a) + deco[..., :3].astype(np.float32) * a).astype(np.uint8)
+    m = (mask.astype(np.float32) / 255.0)[..., None]
+    roi = canvas[y:y + h, x:x + w]
+    canvas[y:y + h, x:x + w] = (roi * (1 - m) + tile * m).astype(np.uint8)
+    return canvas, rect
+
+
 if __name__ == "__main__":
     import argparse
 

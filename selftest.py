@@ -27,6 +27,7 @@ MODULES = [
     "google_auth_oauthlib.flow", "google.oauth2.credentials", "yt_dlp", "edge_tts",
     "pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine", "avatar_sync",
     "ocr_engine", "visual_cues", "rapidocr_onnxruntime",
+    "avatar_3d_engine", "glb_model", "soft_raster", "lipsync_en", "avatar_gestures", "demo_avatars",
 ]
 
 
@@ -146,6 +147,30 @@ def check_avatar() -> str:
     return f"{res['frames']} frames, {res['mode']} animation, {size // 1024} KB"
 
 
+def check_avatar_3d() -> str:
+    """Render a talking built-in 3-D avatar (phoneme lip-sync + gestures), then place it in a podcast corner frame."""
+    import avatar_3d_engine
+    import demo_avatars
+    import video_engine
+
+    with tempfile.TemporaryDirectory() as d:
+        wav, av, base, out = (os.path.join(d, n) for n in ("a.wav", "av.mp4", "base.mp4", "out.mp4"))
+        ff = video_engine.find_ffmpeg()
+        subprocess.run([ff, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=220:duration=1.5", wav],
+                       check=True, timeout=60, creationflags=_flags())
+        model = demo_avatars.ensure_demo_avatars(d)["human"]
+        res = avatar_3d_engine.create_3d_avatar_video(model, wav, av, text="Hello there, welcome to the show.",
+                                                      size=(240, 320), fps=20, quality="fast", ffmpeg_path=ff)
+        subprocess.run([ff, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=navy:s=360x640:r=20:d=1.5",
+                        "-i", wav, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", base],
+                       check=True, timeout=60, creationflags=_flags())
+        placed = video_engine.place_podcast_avatar(base, av, "Bottom-Right", None, 0.4, out, ffmpeg_path=ff)
+        size = os.path.getsize(out)
+        if size < 1000 or res["frames"] < 25:
+            raise RuntimeError(f"3-D avatar video is empty or short: {res}")
+    return f"{res['frames']} frames, {res['lip_sync']} lip-sync, placed at {placed['rect'][:2]}"
+
+
 def check_ocr() -> str:
     """Read burned-in text from a rendered video with the real OCR engine, then unload it again."""
     import cv2
@@ -230,6 +255,7 @@ def run_all(app_path: Optional[Path] = None, log: Callable[[str], None] = print)
         ("whisper model", "fail", check_whisper),
         ("clip pipeline", "fail", check_clip_pipeline),
         ("avatar lip-sync", "fail", check_avatar),
+        ("3D avatar + podcast layout", "fail", check_avatar_3d),
         ("on-screen text (OCR)", "fail", check_ocr),
         ("visual action cues", "fail", check_cues),
         ("app page", "fail", lambda: check_app_page(app_path)),

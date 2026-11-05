@@ -34,8 +34,8 @@ Time: ~15 min of your clicking + 30-60 min of waiting. Needs only a web browser.
    the models, builds with PyInstaller, then **starts the finished exe and checks it answers**
    (the smoke test) before saving anything.
 6. **Download**: when the run is green, scroll to **Artifacts** at the bottom of the run page ->
-   click **CinePulseAI-Portable**. GitHub wraps it once more, so you unzip twice:
-   download -> unzip -> inside is `CinePulseAI-Portable.zip` -> unzip that -> folder `CinePulseAI`.
+   click **CinePulseAI-3D-Studio-Portable**. GitHub wraps it once more, so you unzip twice:
+   download -> unzip -> inside is `CinePulseAI-3D-Studio-Portable.zip` -> unzip that -> folder `CinePulseAI`.
 7. **Run**: open the `CinePulseAI` folder, double-click **CinePulseAI.exe**. Wait 10-40 seconds on
    first start; your browser opens the app. If Windows SmartScreen warns about an unknown publisher:
    *More info -> Run anyway* (it is your own program).
@@ -84,7 +84,7 @@ Needs a PC that can handle ~5 GB of downloads and a long build.
 3. Preview the build (changes nothing):  `python build_exe.py --dry-run`
 4. Build:  `python build_exe.py`
    It downloads `ffmpeg.exe`, the face model and the Whisper model automatically if missing, then writes
-   `dist\CinePulseAI\` and `dist\CinePulseAI-Portable.zip`.
+   `dist\CinePulseAI\` and `dist\CinePulseAI-3D-Studio-Portable.zip`.
    - Use `--no-token` to leave `token.json` out. `--no-download` stops all downloads (you must then
      supply `bin\ffmpeg.exe` yourself).
 5. Run `dist\CinePulseAI\CinePulseAI.exe` (or send the zip to any Windows laptop).
@@ -118,3 +118,21 @@ picture of your avatar. The generated video then shows that picture talking in t
 - If no face is found, the whole picture does a gentle talking pulse instead, and you are told so.
 - If you also add a background video, the avatar appears as a rounded card over it.
 - This is 2-D image warping, not a neural talking-head model, so the motion is stylised and subtle.
+
+## 3D avatars and the podcast layout (AI Generator Lab)
+
+Pick a **Model type** (Photorealistic Human, AI Model, Anime) and optionally upload a `.glb` (Ready Player Me,
+Mixamo, most humanoid exports) or `.vrm` (VRoid) file. With no upload the built-in demo avatar for that style is used.
+
+- **Lip sync** is phoneme level: the narration is turned into visemes (TalkingHead's English rules) and timed against the
+  voiceover's loudness. Models with `viseme_*`, VRM A/I/U/E/O or a `jawOpen` blend shape get the matching mouth shapes.
+- **Gestures**: head nods/tilts and arm poses (open palms, point, wave, hand on heart, thumbs up ...) are chosen from the
+  script, or from your own `[wave]` style notes (motion-engine's keyword director, run offline). Tick/untick "Body gestures".
+- **Position**: Bottom-Right / Bottom-Left / Top-Right / Top-Left or Custom Coordinates (X, Y pixels), scale 15-60 %.
+  The avatar sits in a rounded frame with a border and drop shadow; the layout preview shows exactly where.
+- It renders on the CPU with a built-in software renderer (no GPU, no PyTorch): roughly 0.25-0.5 s per frame at the
+  default size, so a 15 s clip takes a few minutes on a laptop. "Render quality: fast" is the quickest.
+- Not supported: Draco / meshopt compressed GLBs and models with external `.bin` files (a clear error is shown;
+  re-export without compression). Fingers are not posed; thumbs-up / OK are arm poses.
+- Finished videos are backed up to Google Drive automatically when a Folder ID is set.
+- `python build_exe.py --with-torch` additionally bundles PyTorch (+1-2 GB). Nothing in the app needs it today.
