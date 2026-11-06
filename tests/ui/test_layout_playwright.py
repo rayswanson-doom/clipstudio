@@ -156,11 +156,14 @@ class LayoutTests(unittest.TestCase):
             page.get_by_role("tab", name="⚡ AI Generator Lab").click()
             box = page.get_by_text("Enable AI Avatar Lip-Sync Commentary")
             box.wait_for(state="visible", timeout=15000)
-            drop = page.locator('[data-testid="stFileUploaderDropzone"]').nth(2)  # avatar picture
+            drop = page.locator('[data-testid="stFileUploader"]').filter(has_text="Your model").locator(
+                '[data-testid="stFileUploaderDropzone"]')  # avatar model / picture
             self.assertTrue(drop.locator("input[type=file]").is_disabled())
             box.click()
             page.wait_for_function(
-                """() => !document.querySelectorAll('[data-testid="stFileUploaderDropzone"] input[type=file]')[2].disabled""",
+                """() => { const u = [...document.querySelectorAll('[data-testid="stFileUploader"]')]
+                        .find(e => e.textContent.includes('Your model'));
+                    return !!u && !u.querySelector('input[type=file]').disabled; }""",
                 timeout=10000)
             self.assert_no_horizontal_overflow(page)
             box.scroll_into_view_if_needed()
