@@ -2,7 +2,7 @@
 build_exe.py  -  build the CinePulse AI Windows distribution with PyInstaller.
 
     python build_exe.py --dry-run     # scan + show the PyInstaller arguments, build nothing
-    python build_exe.py               # build dist/CinePulseAI/ and dist/CinePulseAI-3D-Studio-Portable.zip
+    python build_exe.py               # build dist/CinePulseAI/ and dist/CinePulseAI-Ultimate-Portable.zip
     python build_exe.py --ci          # same, for an unattended CI machine
     python build_exe.py --git-push    # ...then `git add .`, `git commit`, `git push origin main`
     python build_exe.py --git-only    # only the git step (no build)
@@ -47,9 +47,9 @@ from typing import List, Optional
 import build  # shared constants, preflight scan and helpers
 
 ROOT = Path(__file__).resolve().parent
-ZIP_NAME = "CinePulseAI-3D-Studio-Portable.zip"
-COMMIT_MESSAGE = ("feat: add 3D avatar body motion, pose control, podcast corner positioning for human/anime "
-                  "models, and automated build")
+ZIP_NAME = "CinePulseAI-Ultimate-Portable.zip"
+COMMIT_MESSAGE = ("feat: integrate Remotion, Revideo, LTX-Video paradigms, advanced OCR, 3D avatar corner placement "
+                  "for human/anime models, and automated build")
 COMMIT_TRAILERS = (
     "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>",
     "Claude-Session: https://claude.ai/code/session_01DZZzH74mQWkTiSWum5df7Q",
@@ -252,7 +252,7 @@ def validate_zip(zip_path: Path, top: Optional[str] = None) -> List[str]:
             text = zf.read(app_py).decode("utf-8", "replace")
             for needle in ("CinePulse AI", "Clip Repurposer Studio", "AI Generator Lab",
                            "Enable AI Avatar Lip-Sync Commentary", "Your own script", "Visual actions",
-                           "Model type", "Avatar position"):
+                           "Model type", "Avatar position", "Text reader (OCR)", "Animated backdrop"):
                 if needle not in text:
                     problems.append(f"frontend/app.py in the zip lacks '{needle}'")
         if not any(n.startswith(f"{top}/") for n in names):
@@ -330,6 +330,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--allow-non-windows", action="store_true", help="permit a test build off Windows")
     ap.add_argument("--no-zip", action="store_true", help="do not create the final zip")
     ap.add_argument("--with-paddleocr", action="store_true", help="also bundle PaddleOCR (+~540 MB; default is RapidOCR)")
+    ap.add_argument("--ultimate", action="store_true", help="bundle PaddleOCR AND PyTorch (equivalent to --with-paddleocr --with-torch; very large)")
     ap.add_argument("--with-torch", action="store_true", help="also bundle PyTorch (+1-2 GB; the 3-D avatar renderer does not need it)")
     ap.add_argument("--git-push", action="store_true", help="after a successful build: git add ., commit, push origin main")
     ap.add_argument("--git-only", action="store_true", help="only run the git add/commit/push step")
@@ -352,7 +353,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     report = build.preflight(ROOT, include_token, a.require_token, False, a.allow_non_windows)
     print(report.render())
-    args = pyinstaller_args(ROOT, a.with_paddleocr, a.with_torch)
+    args = pyinstaller_args(ROOT, a.with_paddleocr or a.ultimate, a.with_torch or a.ultimate)
     if a.dry_run:
         print("\nPyInstaller.__main__.run([\n  " + ",\n  ".join(repr(x) for x in args) + "\n])")
         return 0 if report.ok else 1

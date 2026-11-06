@@ -28,6 +28,7 @@ try:  # package import (backend.pipeline) or plain module (pipeline)
     from . import avatar_3d_engine
     from . import demo_avatars
     from . import ocr_engine
+    from . import render_engine
     from . import transcriber as _transcriber_mod
     from .visual_cues import apply_cues_to_video, has_effects
     from .scorer import align_cues, build_narration, find_viral_clips
@@ -40,6 +41,7 @@ except ImportError:  # pragma: no cover
     import avatar_3d_engine
     import demo_avatars
     import ocr_engine
+    import render_engine
     import transcriber as _transcriber_mod
     from visual_cues import apply_cues_to_video, has_effects
     from scorer import align_cues, build_narration, find_viral_clips
@@ -115,11 +117,11 @@ def _remove(path) -> None:
         logger.debug("could not remove %s", path)
 
 
-def _read_screen_text(video, interval, max_frames, warnings, progress, stage, lo, hi) -> list:
+def _read_screen_text(video, interval, max_frames, warnings, progress, stage, lo, hi, backend="auto") -> list:
     """OCR a video; any failure becomes a warning (the feature is optional). Frees the OCR engine after."""
     try:
         return ocr_engine.extract_screen_text(
-            video, interval=interval, max_frames=max_frames,
+            video, interval=interval, max_frames=max_frames, backend=backend,
             progress=lambda f: _emit(progress, stage, lo + (hi - lo) * f),
         )
     except Exception as exc:
@@ -146,6 +148,7 @@ def run_vugola_pipeline(
     allow_center_fallback: bool = False,
     read_screen_text: bool = False,
     ocr_interval: float = 1.0,
+    ocr_backend: str = "auto",
     keep_download: bool = False,
     keep_models: bool = False,
 ) -> dict:
@@ -183,7 +186,7 @@ def run_vugola_pipeline(
         if read_screen_text:
             _emit(progress, "Reading on-screen text (OCR)", 0.30)
             screen_segments = _read_screen_text(local, ocr_interval, ocr_engine.DEFAULT_MAX_FRAMES, warnings,
-                                                progress, "Reading on-screen text (OCR)", 0.30, 0.44)
+                                                progress, "Reading on-screen text (OCR)", 0.30, 0.44, ocr_backend)
         spoken_words = words
         if not words and screen_segments:
             words = ocr_engine.segments_to_words(screen_segments)
@@ -264,45 +267,68 @@ def _media_seconds(path: str) -> float:
         cap.release()
 
 
-def _podcast_commentary(avatar_image, avatar_type, script, audio_path, out_name, out_dir, background_video,
-                       position, xy, scale, gestures, quality, audio_source, ffmpeg_path, progress, warnings):
-    """Voiceover + background -> base video; avatar (3-D model or picture) -> avatar video; avatar placed in a
-    corner / at X,Y in a rounded podcast frame. Falls back to the plain base video if anything in the avatar
-    chain fails, so the user always gets a video. Returns (video_path, avatar_info or None)."""
+def _podcast_commentary(avatar_image, avatar_type, script, audio_path, out_name, out_dir, background_video, position, xy,
+                       scale, gestures, quality, audio_source, ffmpeg_path, progress, warnings, segments=None,
+                       music_path=None, broll_style="aurora"):
+    """Voiceover + B-roll (or the animated backdrop) + OCR text overlays + avatar in a corner/at X,Y, composed by
+    render_engine. Falls back to the simple ffmpeg layout, and then to the plain voiceover video, if a stage fails,
+    so the user always gets a video. Returns (video_path, avatar_info or None)."""
     position = position or "Bottom-Right"
-    _emit(progress, "Preparing the video", 0.40)
-    base = out_name + ".base.mp4"
-    merge_audio_with_video(audio_path, base, background_video=background_video, ffmpeg_path=ffmpeg_path)
-    avatar_clip = out_name + ".avatar.mp4"
+    avatar_clip, info = out_name + ".avatar.mp4", None
+    if avatar_image:
+        try:
+            model = avatar_image
+            if str(avatar_image).startswith("demo:"):
+                style = str(avatar_image).split(":", 1)[1] or "human"
+                model = demo_avatars.ensure_demo_avatars(str(Path(out_dir) / "avatars"))[style if style in demo_avatars.DEMO_STYLES else "human"]
+                avatar_type = style if style in demo_avatars.DEMO_STYLES else avatar_type
+            is_model = Path(str(model)).suffix.lower() in avatar_3d_engine.MODEL_EXTENSIONS
+            label = "Animating the 3D avatar" if is_model else "Animating the avatar (lip-sync)"
+            _emit(progress, label, 0.40)
+            cb = lambda f: _emit(progress, label, 0.40 + 0.30 * f)  # noqa: E731
+            if is_model:
+                actual = _media_seconds(audio_path)
+                notes = [{"start": c["start"], "text": c["text"]}
+                         for c in align_cues(script["cues"], script["estimated_seconds"], actual) if c.get("effect") == "none"]
+                info = avatar_3d_engine.create_3d_avatar_video(
+                    model, audio_path, avatar_clip, text=script["script"], notes=notes, style=avatar_type,
+                    gestures=gestures, quality=quality, ffmpeg_path=ffmpeg_path, progress=cb)
+            else:
+                info = create_avatar_video(model, audio_path, avatar_clip, auto_words=True, size=(480, 640),
+                                           ffmpeg_path=ffmpeg_path, progress=cb)
+            warnings.extend(info.get("warnings", []))
+        except Exception as exc:
+            logger.warning("podcast avatar failed: %s", exc)
+            warnings.append(f"The avatar could not be added ({exc}); made a plain video instead.")
+            info = None
+    base = None
     try:
-        model = avatar_image
-        if str(avatar_image).startswith("demo:"):
-            style = str(avatar_image).split(":", 1)[1] or "human"
-            model = demo_avatars.ensure_demo_avatars(str(Path(out_dir) / "avatars"))[style if style in demo_avatars.DEMO_STYLES else "human"]
-            avatar_type = style if style in demo_avatars.DEMO_STYLES else avatar_type
-        is_model = Path(str(model)).suffix.lower() in avatar_3d_engine.MODEL_EXTENSIONS
-        label = "Animating the 3D avatar" if is_model else "Animating the avatar (lip-sync)"
-        _emit(progress, label, 0.45)
-        cb = lambda f: _emit(progress, label, 0.45 + 0.30 * f)  # noqa: E731
-        if is_model:
-            actual = _media_seconds(audio_path)
-            notes = [{"start": c["start"], "text": c["text"]}
-                     for c in align_cues(script["cues"], script["estimated_seconds"], actual) if c.get("effect") == "none"]
-            info = avatar_3d_engine.create_3d_avatar_video(
-                model, audio_path, avatar_clip, text=script["script"], notes=notes, style=avatar_type,
-                gestures=gestures, quality=quality, ffmpeg_path=ffmpeg_path, progress=cb)
-        else:
-            info = create_avatar_video(model, audio_path, avatar_clip, auto_words=True, size=(480, 640),
-                                       ffmpeg_path=ffmpeg_path, progress=cb)
-        warnings.extend(info.get("warnings", []))
-        _emit(progress, "Placing the avatar in the podcast frame", 0.80)
-        placed = place_podcast_avatar(base, avatar_clip, position, xy, scale, output_path=out_name,
-                                      audio_source=audio_source, ffmpeg_path=ffmpeg_path)
-        info["layout"] = {"preset": placed["preset"], "rect": placed["rect"], "scale": placed["scale"]}
-        return placed["output_path"], info
-    except Exception as exc:  # the voiceover + background video is still worth having
-        logger.warning("podcast avatar failed: %s", exc)
-        warnings.append(f"The avatar could not be added ({exc}); made a plain video instead.")
+        _emit(progress, "Composing the video (B-roll, text, avatar)", 0.75)
+        try:
+            res = render_engine.render_commentary(
+                audio_path, out_name, background_video=background_video, avatar_video=avatar_clip if info else None,
+                position=position, xy=xy, scale=scale, screen_segments=segments, music_path=music_path,
+                broll_style=broll_style, ffmpeg_path=ffmpeg_path,
+                progress=lambda f: _emit(progress, "Composing the video (B-roll, text, avatar)", 0.75 + 0.12 * f))
+            warnings.extend(res.get("warnings", []))
+            if info is not None and res.get("avatar"):
+                info["layout"] = {"preset": res["avatar"]["preset"], "rect": res["avatar"]["rect"], "scale": float(scale)}
+            return res["output_path"], info
+        except Exception as exc:  # fall back to the simple ffmpeg layout
+            logger.warning("composition failed: %s", exc)
+            warnings.append(f"The multi-track renderer failed ({exc}); used the simple layout.")
+        base = out_name + ".base.mp4"
+        merge_audio_with_video(audio_path, base, background_video=background_video, ffmpeg_path=ffmpeg_path)
+        if info is not None:
+            try:
+                placed = place_podcast_avatar(base, avatar_clip, position, xy, scale, output_path=out_name,
+                                              audio_source=audio_source, ffmpeg_path=ffmpeg_path)
+                info["layout"] = {"preset": placed["preset"], "rect": placed["rect"], "scale": placed["scale"]}
+                return placed["output_path"], info
+            except Exception as exc:
+                logger.warning("avatar placement failed: %s", exc)
+                warnings.append(f"The avatar could not be added ({exc}); made a plain video instead.")
+                info = None
         _remove(out_name)
         os.replace(base, out_name)
         base = None
@@ -334,6 +360,10 @@ def run_viewmax_pipeline(
     avatar_gestures: bool = True,
     avatar_quality: str = "balanced",
     avatar_audio: str = "base",
+    ocr_backend: str = "auto",
+    show_screen_text: bool = True,
+    music_path: Optional[str] = None,
+    broll_style: str = "aurora",
 ) -> dict:
     """Prompt / your own script -> voiceover -> video (+ avatar, + visual action cues) -> Drive.
 
@@ -350,6 +380,11 @@ def run_viewmax_pipeline(
                           rendered as camera moves in time with the narration
     read_background_text  OCR the background video and narrate the text found in it after the script
     avatar_enabled        show `avatar_image` talking in sync with the voiceover (avatar_sync.py)
+    ocr_backend           "auto" (PaddleOCR if installed, else RapidOCR) | "paddleocr" | "rapidocr"
+    show_screen_text      with read_background_text: also show the text read from the frames as captions, at the
+                          moment it appears (render_engine). The text is narrated either way.
+    music_path            optional background music, ducked under the voice;  broll_style  animated backdrop used
+                          when there is no background video: "aurora" | "sunset" | "mono"
 
     Returns {"script": {...narration incl. cues + shot_list...}, "audio_path", "video_path",
              "drive_link", "avatar", "cues_applied", "screen_text", "warnings"}.
@@ -380,14 +415,18 @@ def run_viewmax_pipeline(
     stamp = int(time.time())
     try:
         screen_lines: list = []
+        screen_segments: list = []
+        screen_queue: list = []
         if read_background_text:
             if not background_video:
                 warnings.append("Add a background video to read its on-screen text.")
             else:
                 _emit(progress, "Reading on-screen text from the background video (OCR)", 0.03)
                 segs = _read_screen_text(background_video, 1.0, 180, warnings, progress,
-                                         "Reading on-screen text from the background video (OCR)", 0.03, 0.12)
-                screen_lines = ocr_engine.screen_text_in_range(segs, 0.0, float("inf"))
+                                         "Reading on-screen text from the background video (OCR)", 0.03, 0.12, ocr_backend)
+                screen_segments = segs
+                screen_queue = ocr_engine.narration_queue(segs)
+                screen_lines = [q["text"] for q in screen_queue]
                 if not screen_lines and not any("Could not read" in w for w in warnings):
                     warnings.append("No on-screen text was found in the background video.")
 
@@ -400,10 +439,17 @@ def run_viewmax_pipeline(
 
         out_name = str(out_dir / f"viewmax_{_safe_name(script['topic'], 30)}_{stamp}.mp4")
         video_path, avatar_info = None, None
+        overlay_segments = screen_segments if show_screen_text else []
         if avatar_enabled and (avatar_kind == "3d" or avatar_position is not None):
             video_path, avatar_info = _podcast_commentary(
                 avatar_image, avatar_type, script, audio_path, out_name, out_dir, background_video, avatar_position,
-                avatar_xy, avatar_scale, avatar_gestures, avatar_quality, avatar_audio, ffmpeg_path, progress, warnings)
+                avatar_xy, avatar_scale, avatar_gestures, avatar_quality, avatar_audio, ffmpeg_path, progress, warnings,
+                segments=overlay_segments, music_path=music_path, broll_style=broll_style)
+        elif not avatar_enabled and (overlay_segments or music_path):  # no avatar, but text overlays / music
+            video_path, _ = _podcast_commentary(
+                None, avatar_type, script, audio_path, out_name, out_dir, background_video, None, None, avatar_scale,
+                False, avatar_quality, avatar_audio, ffmpeg_path, progress, warnings, segments=overlay_segments,
+                music_path=music_path, broll_style=broll_style)
         elif avatar_enabled:
             _emit(progress, "Animating the avatar (lip-sync)", 0.45)
             try:
@@ -454,7 +500,7 @@ def run_viewmax_pipeline(
         return {
             "script": script, "audio_path": audio_path, "video_path": video_path,
             "drive_link": drive_link, "avatar": avatar_info, "cues_applied": cues_applied,
-            "screen_text": screen_lines, "warnings": warnings,
+            "screen_text": screen_lines, "screen_queue": screen_queue, "warnings": warnings,
         }
     finally:
         release_memory(not keep_models)

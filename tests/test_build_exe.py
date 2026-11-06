@@ -272,7 +272,7 @@ class MainTests(unittest.TestCase):
             self.assertNotIn("WARNING: ffmpeg", out.getvalue())
             self.assertIn("Zip validation passed", out.getvalue())
             self.assertEqual(build_exe.validate_zip(z), [])
-            self.assertEqual(build_exe.ZIP_NAME, "CinePulseAI-3D-Studio-Portable.zip")
+            self.assertEqual(build_exe.ZIP_NAME, "CinePulseAI-Ultimate-Portable.zip")
 
     def test_errors_stop_before_pyinstaller(self):
         with tempfile.TemporaryDirectory() as d:
@@ -399,7 +399,7 @@ class GitPublishTests(unittest.TestCase):
         self.assertTrue(r["committed"] and r["pushed"])
         self.assertIn("a.py", r["files"])
         log = self.remote_log()
-        self.assertTrue(log.startswith("feat: add 3D avatar body motion, pose control, podcast corner positioning for human/anime models, and automated build"))
+        self.assertTrue(log.startswith("feat: integrate Remotion, Revideo, LTX-Video paradigms, advanced OCR, 3D avatar corner placement for human/anime models, and automated build"))
         self.assertIn("Claude-Session:", log)
 
     def test_second_run_with_nothing_new_does_not_fail_or_commit(self):
@@ -465,8 +465,18 @@ class PackagingContentsTests(unittest.TestCase):
             self.assertTrue(any(d.endswith(f"{os.pathsep}{folder}") for d in datas), (folder, datas))
         self.assertTrue(args[-1].endswith("launcher.py"))
 
+    def test_ultimate_flag_bundles_paddle_and_torch(self):
+        import argparse
+        src = (ROOT / "build_exe.py").read_text(encoding="utf-8")
+        self.assertIn("--ultimate", src)
+        self.assertIn("a.with_paddleocr or a.ultimate, a.with_torch or a.ultimate", src)
+        wf = (ROOT / ".github" / "workflows" / "build-windows-exe.yml").read_text(encoding="utf-8")
+        self.assertIn("bundle_paddleocr", wf)
+        self.assertIn("bundle_torch", wf)
+        self.assertIn("CinePulseAI-Ultimate-Portable.zip", wf)
+
     def test_3d_modules_are_bundled_and_torch_is_opt_in(self):
-        for m in ("avatar_3d_engine", "glb_model", "soft_raster", "lipsync_en", "avatar_gestures", "demo_avatars"):
+        for m in ("avatar_3d_engine", "glb_model", "soft_raster", "lipsync_en", "avatar_gestures", "demo_avatars", "render_engine"):
             self.assertIn(f"backend/{m}.py", build.REQUIRED_SOURCES)
             self.assertTrue((ROOT / "backend" / f"{m}.py").is_file())
             self.assertIn(m, build_exe.pyinstaller_args(ROOT))

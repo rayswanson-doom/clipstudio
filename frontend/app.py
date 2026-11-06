@@ -57,6 +57,9 @@ UPLOAD_DIR = Path(tempfile.gettempdir()) / "cinepulse_uploads"
 VIDEO_TYPES = ["mp4", "mov", "mkv", "webm", "avi"]
 AVATAR_TYPES = ["glb", "vrm", "jpg", "jpeg", "png"]  # 3D models first, pictures too
 MODEL_TYPES = {"Photorealistic Human": "human", "AI Model": "ai", "Anime": "anime"}
+AUDIO_TYPES = ["mp3", "wav", "m4a", "ogg"]
+OCR_CHOICES = {"Auto (PaddleOCR if installed)": "auto", "PaddleOCR": "paddleocr", "RapidOCR (built in)": "rapidocr"}
+BACKDROPS = {"Aurora (blue / magenta)": "aurora", "Sunset": "sunset", "Mono (dark grey)": "mono"}
 QUALITY_CHOICES = {"Balanced": "balanced", "Fast (low-spec laptops)": "fast", "High (slower, smoother edges)": "high"}
 VOICES = [
     "en-US-AriaNeural", "en-US-GuyNeural", "en-US-JennyNeural",
@@ -195,6 +198,26 @@ video,audio{border-radius:14px;max-width:100%;}
   .cp-stat .v{font-size:1.3rem;} .cp-thumb{max-height:220px;aspect-ratio:16/9;}
 }
 @media (prefers-reduced-motion:reduce){ *{transition:none !important;} }
+
+/* ---------- motion (GSAP-inspired easings: power3.out, back.out; transform/opacity only) ---------- */
+:root{--ease-power3-out:cubic-bezier(.215,.61,.355,1);--ease-back-out:cubic-bezier(.34,1.56,.64,1);--ease-power2-inout:cubic-bezier(.645,.045,.355,1);}
+@keyframes cp-rise{from{opacity:0;transform:translateY(14px);}to{opacity:1;transform:none;}}
+@keyframes cp-pop{from{opacity:0;transform:translateY(8px) scale(.96);}to{opacity:1;transform:none;}}
+@keyframes cp-float{0%,100%{transform:translateY(0);}50%{transform:translateY(-3px);}}
+[role="tabpanel"]{animation:cp-rise .55s var(--ease-power3-out) both;}
+[role="tabpanel"] [data-testid="stVerticalBlockBorderWrapper"]{animation:cp-rise .6s var(--ease-power3-out) both;}
+[role="tabpanel"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(2){animation-delay:.06s;}
+[role="tabpanel"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(3){animation-delay:.12s;}
+[role="tabpanel"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(n+4){animation-delay:.18s;}
+.cp-stat{animation:cp-pop .5s var(--ease-back-out) both;}
+.cp-stat:nth-child(2){animation-delay:.05s;} .cp-stat:nth-child(3){animation-delay:.10s;} .cp-stat:nth-child(4){animation-delay:.15s;}
+.cp-stat:nth-child(n+5){animation-delay:.20s;}
+.cp-hero .logo{animation:cp-float 4.5s var(--ease-power2-inout) infinite;}
+[role="tablist"] [role="tab"]{transition:transform .25s var(--ease-back-out),background-color .25s var(--ease-power3-out),color .25s ease !important;}
+[role="tablist"] [role="tab"]:hover{transform:translateY(-1px);}
+.stButton>button{transition:transform .25s var(--ease-back-out),box-shadow .25s var(--ease-power3-out),filter .2s ease;}
+.stButton>button:active{transform:scale(.98);}
+@media (prefers-reduced-motion:reduce){ *,*::before,*::after{animation:none !important;transition:none !important;} }
 </style>
 """
 
@@ -402,6 +425,8 @@ def render_clip_tab(folder_id: str) -> None:
             value=False, key="vugola_ocr",
             help="Looks at one frame per second on your CPU. Slower on long videos; loaded only when you click Generate.",
         )
+        clip_ocr_label = st.selectbox("Text reader (OCR)", list(OCR_CHOICES), key="vugola_ocr_backend", disabled=not ocr_on,
+                                      help="Which engine reads the text burned into the video frames.")
 
     if st.button("Generate viral clips", type="primary", key="vugola_run"):
         if not url.strip() and uploaded is None:
@@ -420,6 +445,7 @@ def render_clip_tab(folder_id: str) -> None:
                     source, folder_id, top_n=top_n, min_len=min_len, max_len=max_len,
                     output_dir=str(OUTPUT_DIR), progress=callback, allow_center_fallback=fallback,
                     read_screen_text=ocr_on,
+                    **({"ocr_backend": OCR_CHOICES[clip_ocr_label]} if ocr_on and OCR_CHOICES[clip_ocr_label] != "auto" else {}),
                 )
             except Exception as exc:
                 st.session_state.pop("vugola_result", None)
@@ -481,8 +507,12 @@ def render_lab_tab(folder_id: str) -> None:
         custom_script = st.text_area(
             "Your own script", key="viewmax_script", height=150,
             placeholder="Paste the exact words to speak. Leave empty to let the app write a script from the prompt above.\n"
-                        "You can add directions inside the script, like: Welcome back! [zoom in] Today we test a drone.",
+                        "You can add directions inside the script, like: Welcome back! [zoom in] Today we test a drone.\n\n"
+                        "Longer scripts work too:\nSCENE 1: Hook\nVISUAL: zoom in on the logo\nNARRATOR: Stop scrolling!\n"
+                        "[0:06] Did you know? [wave]\n(slowly pan right)\n[pause 1s]",
         )
+        st.caption("Script format: SCENE headings, NARRATOR: labels, VISUAL: / (parenthesis) / > direction lines, "
+                   "[m:ss] timecodes, [pause] and inline [directions]. Directions apply to the next spoken sentence.")
         action_prompt = st.text_area(
             "Visual actions", key="viewmax_actions", height=110,
             placeholder="Describe what should happen on screen, in order. Example:\n"
@@ -498,6 +528,19 @@ def render_lab_tab(folder_id: str) -> None:
         "Read & narrate the on-screen text of the background video (OCR)", value=False, key="viewmax_read_text",
         help="Finds burned-in text in your background video and speaks it after the script.",
     )
+    ocol1, ocol2 = st.columns(2)
+    with ocol1:
+        ocr_label = st.selectbox("Text reader (OCR)", list(OCR_CHOICES), key="viewmax_ocr_backend", disabled=not read_text,
+                                 help="Which engine reads the text burned into the video frames.")
+    with ocol2:
+        show_text = st.checkbox("Also show the text as captions", value=True, key="viewmax_show_text", disabled=not read_text,
+                                help="Displays each line on screen at the moment it appears in your background video.")
+    music = st.file_uploader("Background music (optional - kept quiet under the voice)", type=AUDIO_TYPES, key="viewmax_music")
+    backdrop_label = st.selectbox("Animated backdrop (used when there is no background video)", list(BACKDROPS),
+                                  key="viewmax_backdrop")
+    ltx = pipeline.render_engine.ltx_video_status()
+    st.caption("Readers installed: " + (", ".join(pipeline.ocr_engine.available_backends()) or "none")
+               + "  ·  AI-generated B-roll (LTX-Video): " + ("ready" if ltx["available"] else "not available here - " + ltx["reason"]))
     voice = st.selectbox("Voice", VOICES, index=0, key="viewmax_voice")
 
     with st.container(border=True):
@@ -574,6 +617,14 @@ def render_lab_tab(folder_id: str) -> None:
                     extra["action_prompt"] = action_prompt
                 if read_text:
                     extra["read_background_text"] = True
+                    extra["ocr_backend"] = OCR_CHOICES[ocr_label]
+                    extra["show_screen_text"] = bool(show_text)
+                if music is not None:
+                    music_path = save_upload(music)
+                    temp.append(music_path)
+                    extra["music_path"] = music_path
+                if BACKDROPS[backdrop_label] != "aurora":
+                    extra["broll_style"] = BACKDROPS[backdrop_label]
                 st.session_state["viewmax_result"] = pipeline.run_viewmax_pipeline(
                     prompt, folder_id, background_video=bg_path, voice=voice,
                     output_dir=str(OUTPUT_DIR), progress=callback, **extra,

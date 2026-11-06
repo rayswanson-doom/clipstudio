@@ -469,6 +469,129 @@ def split_sentences(text: str) -> List[str]:
     return [p.strip() for p in parts if p and re.search(r"\w", p)]
 
 
+# --------------------------------------------------------------------------- #
+# complex scripts: scenes, speaker labels, visual lines, timecodes, pauses
+# --------------------------------------------------------------------------- #
+_SCENE_RE = re.compile(r"^\s*(#{1,3}\s*)?(?:scene|part|act|chapter|section)\b\s*(\d+)?\s*([:\-\u2013\u2014.])?\s*(.*)$", re.IGNORECASE)
+_VISUAL_LABELS = ("visuals", "visual", "video", "action", "on screen", "on-screen", "onscreen", "b-roll", "broll", "show",
+                  "cut to", "camera", "shot", "screen", "overlay", "graphic", "graphics", "effect", "fx", "animation")
+_VISUAL_RE = re.compile(r"^\s*(?:" + "|".join(re.escape(l) for l in sorted(_VISUAL_LABELS, key=len, reverse=True)) + r")\s*:\s*(.+)$", re.IGNORECASE)
+_SPEAKERS = ("narrator", "host", "voiceover", "voice over", "voice-over", "speaker", "vo", "v.o.", "announcer",
+             "presenter", "guest", "avatar", "me")
+_SPEAKER_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9 .'\-]{0,24}?)\s*(\((?:V\.?O\.?|O\.?S\.?|voice[- ]?over|off[- ]?screen)\))?\s*:\s+(\S.*)$")
+_TIMECODE_LEAD = re.compile(r"^\s*[\[(]?\s*(\d{1,2}):(\d{2})(?:\.(\d+))?\s*[\])]?\s*[-\u2013\u2014:]?\s*")
+_TIMECODE_INLINE = re.compile(r"\[\s*(\d{1,2}):(\d{2})(?:\.(\d+))?\s*\]")
+_PAUSE_RE = re.compile(r"[\[(]\s*(?:beat|pause)(?:\s+(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds)?)?\s*[\])]", re.IGNORECASE)
+_WHOLE_BRACKET = re.compile(r"^\s*[\[(](.+)[\])]\s*$")
+
+
+def _timecode(m) -> float:
+    frac = float("0." + m.group(3)) if m.group(3) else 0.0
+    return int(m.group(1)) * 60 + int(m.group(2)) + frac
+
+
+def _is_speaker(label: str, paren: Optional[str]) -> bool:
+    low = label.strip().casefold()
+    return bool(paren) or low in _SPEAKERS or (label.strip().isupper() and 1 < len(label.strip()) <= 24)
+
+
+def parse_script_document(text: str) -> dict:
+    """Understand a script written like a screenplay / shot list, not only plain sentences.
+
+    Recognised (all optional, mix freely):
+      SCENE 2: The reveal        scene headings ("Scene", "Part", "Act", "Chapter", "Section", "## Scene")
+      NARRATOR: Hello there.     speaker labels (stripped; names in CAPS, known roles, or "(V.O.)")
+      VISUAL: zoom in on logo    visual lines: VISUAL / VIDEO / ACTION / ON SCREEN / B-ROLL / SHOW / CUT TO / CAMERA ...
+      (slowly pan right)         a whole line in () or [] is a direction
+      > flash at the price       "> " quote lines are directions
+      [0:12] Big reveal.         timecodes at the start of a line, or "[0:12]" inside it, pin that line's directions
+      [pause 1s] / (beat)        pauses (kept as notes)
+      Hello [zoom in] world.     inline [directions] inside a spoken sentence
+    Direction lines belong to the NEXT spoken sentence (screenplay order). Returns
+      {"sentences": [spoken text], "events": [{"sentence_index","text","source","at"?}],
+       "scenes": [{"index","title","sentence_index"}], "sentence_times": {sentence_index: seconds}}"""
+    sentences: List[str] = []
+    events: List[dict] = []
+    scenes: List[dict] = []
+    sentence_times: Dict[int, float] = {}
+    pending: List[dict] = []  # directions waiting for the next spoken sentence
+
+    def add_event(idx: int, txt: str, source: str, at: Optional[float]) -> None:
+        txt = re.sub(r"\s+", " ", txt).strip(" .,;")
+        if txt:
+            ev = {"sentence_index": idx, "text": txt, "source": source}
+            if at is not None:
+                ev["at"] = round(at, 2)
+            events.append(ev)
+
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        pin: Optional[float] = None
+        m = _TIMECODE_LEAD.match(line)
+        if m and line[m.end():].strip():
+            pin, line = _timecode(m), line[m.end():].strip()
+        m = _TIMECODE_INLINE.search(line)
+        if m:
+            pin = _timecode(m) if pin is None else pin
+            line = _TIMECODE_INLINE.sub(" ", line).strip()
+        if not line:
+            continue
+        sc = _SCENE_RE.match(line)
+        if sc and (sc.group(1) or sc.group(2) or sc.group(3)):  # "Part of the reason..." is speech, "Part 2 - Intro" a heading
+            scenes.append({"index": len(scenes) + 1, "title": (sc.group(4) or "").strip(" -:."), "sentence_index": len(sentences)})
+            continue
+        vm = _VISUAL_RE.match(line)
+        if vm:
+            pending.append({"text": vm.group(1), "source": "visual", "at": pin})
+            continue
+        if line.startswith(">"):
+            pending.append({"text": line.lstrip("> ").strip(), "source": "visual", "at": pin})
+            continue
+        pm = _PAUSE_RE.fullmatch(line)
+        if pm:
+            pending.append({"text": f"pause {pm.group(1)}s" if pm.group(1) else "pause", "source": "pause", "at": pin})
+            continue
+        wb = _WHOLE_BRACKET.match(line)
+        if wb and not re.search(r"[.!?]\s+\S", wb.group(1)) and "[" not in wb.group(1):
+            pending.append({"text": wb.group(1), "source": "visual", "at": pin})
+            continue
+        sp = _SPEAKER_RE.match(line)
+        if sp and _is_speaker(sp.group(1), sp.group(2)):
+            line = sp.group(3)
+        first = True
+        for sent in split_sentences(line):
+            local: List[tuple] = []
+            for pm in _PAUSE_RE.finditer(sent):
+                local.append((f"pause {pm.group(1)}s" if pm.group(1) else "pause", "pause"))
+            sent = _PAUSE_RE.sub(" ", sent)
+            for cm in _INLINE_CUE.finditer(sent):
+                local.append((cm.group(1).strip(), "inline"))
+            spoken = re.sub(r"\s+", " ", _INLINE_CUE.sub(" ", sent)).strip()
+            has_speech = bool(re.search(r"\w", spoken))
+            idx = len(sentences)
+            if has_speech and first:
+                for ev in pending:
+                    add_event(idx, ev["text"], ev["source"], ev["at"])
+                pending = []
+            for txt, src in local:
+                add_event(idx, txt, src, pin if pin is not None and first else None)
+            if has_speech:
+                if first and pin is not None:
+                    sentence_times[idx] = pin
+                sentences.append(spoken)
+                first = False
+    last = max(0, len(sentences) - 1)
+    for ev in pending:
+        add_event(last, ev["text"], ev["source"], ev["at"])
+    for ev in events:
+        ev["sentence_index"] = min(ev["sentence_index"], last)
+    for sc in scenes:
+        sc["sentence_index"] = min(sc["sentence_index"], last)
+    return {"sentences": sentences, "events": events, "scenes": scenes, "sentence_times": sentence_times}
+
+
 def build_narration(
     prompt: Optional[str] = None,
     custom_script: Optional[str] = None,
@@ -490,18 +613,15 @@ def build_narration(
     Cue times are ESTIMATES from word counts; use align_cues() once the real audio length is known.
     """
     custom = (custom_script or "").strip()
-    inline: List[tuple] = []  # (sentence_index, direction text)
+    inline: List[dict] = []  # directions parsed out of the script (visual lines, inline [..], pauses)
+    scenes: List[dict] = []
+    pinned_times: Dict[int, float] = {}
     if custom:
-        sentences_raw: List[str] = []
-        for sent in split_sentences(custom):
-            for m in _INLINE_CUE.finditer(sent):
-                inline.append((len(sentences_raw), m.group(1).strip()))
-            spoken = re.sub(r"\s+", " ", _INLINE_CUE.sub(" ", sent)).strip()
-            if re.search(r"\w", spoken):
-                sentences_raw.append(spoken)
-        if not sentences_raw:
+        doc = parse_script_document(custom)
+        sentences = doc["sentences"]
+        if not sentences:
             raise ValueError("Your script has no speakable text (only [directions]).")
-        sentences = sentences_raw
+        inline, scenes, pinned_times = doc["events"], doc["scenes"], doc["sentence_times"]
         source, topic = "custom", (prompt or " ".join(sentences[0].split()[:6])).strip()
     else:
         if not (prompt or "").strip():
@@ -510,7 +630,8 @@ def build_narration(
         sentences, source, topic = split_sentences(gen["script"]), "generated", gen["topic"]
 
     lines = []
-    for text in (screen_text or [])[:max_screen_lines]:
+    for item in (screen_text or [])[:max_screen_lines]:
+        text = item.get("text", "") if isinstance(item, dict) else item  # plain lines or ocr_engine.narration_queue() items
         t = re.sub(r"\s+", " ", str(text)).strip(" .")
         if len(re.findall(r"\w", t)) >= 2:  # drop single-character OCR noise
             lines.append(f"The text on screen reads: {t}.")
@@ -529,19 +650,24 @@ def build_narration(
     for i, beat in enumerate(beats):
         si = min(n_sent - 1, int(i * n_sent / len(beats)))
         cues.append({"sentence_index": si, "text": beat["text"], "effect": beat["effect"]})
-    for si, text in inline:
-        cues.append({"sentence_index": min(si, len(sentences) - 1), "text": text, "effect": effect_for(text)})
+    for ev in inline:
+        cue = {"sentence_index": min(ev["sentence_index"], len(sentences) - 1), "text": ev["text"],
+               "effect": "none" if ev["source"] == "pause" else effect_for(ev["text"])}
+        if "at" in ev:
+            cue["at"] = ev["at"]  # a timecode written in the script
+        cues.append(cue)
     cues.sort(key=lambda c: c["sentence_index"])
     for i, c in enumerate(cues):
         c["index"] = i
-        c["start"] = round(starts[c["sentence_index"]], 2)
+        c["pinned"] = "at" in c
+        c["start"] = round(c.pop("at") if c["pinned"] else starts[c["sentence_index"]], 2)
         later = [x for x in starts if x > c["start"] + 1e-9]
-        c["end"] = round(min(later[0] if later else acc, c["start"] + 6.0), 2)  # at most 6 s per cue
+        c["end"] = round(max(min(later[0] if later else acc, c["start"] + 6.0), c["start"] + 1.0), 2)  # 1-6 s per cue
     wc = sum(words_per)
     return {
         "script": script, "sentences": sentences, "word_count": wc,
         "estimated_seconds": round(wc / _WORDS_PER_SECOND, 1), "source": source, "topic": topic,
-        "cues": cues,
+        "cues": cues, "scenes": [{**sc, "start": round(starts[min(sc["sentence_index"], len(starts) - 1)], 2)} for sc in scenes],
         "shot_list": [f"{c['start']:.1f}s  {c['effect'].replace('_', ' ') if c['effect'] != 'none' else 'note'}: {c['text']}"
                       for c in cues],
     }
@@ -552,7 +678,8 @@ def align_cues(cues: List[dict], estimated_seconds: float, actual_seconds: float
     if estimated_seconds <= 0 or actual_seconds <= 0:
         return [dict(c) for c in cues]
     k = actual_seconds / estimated_seconds
-    return [{**c, "start": round(c["start"] * k, 2), "end": round(c["end"] * k, 2)} for c in cues]
+    return [dict(c) if c.get("pinned") else {**c, "start": round(c["start"] * k, 2), "end": round(c["end"] * k, 2)}
+            for c in cues]  # cues pinned with a timecode in the script keep their exact time
 
 
 if __name__ == "__main__":

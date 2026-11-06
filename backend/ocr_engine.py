@@ -42,7 +42,7 @@ DEFAULT_MAX_FRAMES = 900  # hard cap so a 3-hour video cannot run for hours
 MAX_SIDE = 960  # frames are shrunk to this before OCR: much faster, text stays readable
 SAME_FRAME_DIFF = 3.0  # mean grey difference (0-255) below which a frame counts as unchanged
 SAME_TEXT_RATIO = 0.85  # two readings this similar are the same on-screen text
-BACKENDS = ("rapidocr", "paddleocr")  # "auto" tries them in this order: RapidOCR is small, ships its models and is what the exe bundles
+BACKENDS = ("paddleocr", "rapidocr")  # "auto" tries them in this order: PaddleOCR when it is installed (most accurate), else RapidOCR (the PP-OCR models on ONNX, small, bundled in the exe)
 _MODULES = {"paddleocr": ("paddleocr",), "rapidocr": ("rapidocr_onnxruntime", "rapidocr")}
 
 Reading = Tuple[str, float]  # (text line, confidence 0..1)
@@ -392,6 +392,30 @@ def merge_transcript(words: Sequence[dict], segments: Sequence[Segment]) -> List
         items.append({"source": "screen", "start": float(seg["start"]), "end": float(seg["end"]),
                       "text": str(seg["text"])})
     return sorted(items, key=lambda i: (i["start"], i["source"] != "speech"))
+
+
+def narration_queue(segments: Sequence[Segment], max_lines: int = 8, min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+                    min_word_chars: int = 2) -> List[dict]:
+    """The text read from video frames, as an ordered queue ready to be narrated and/or shown on screen.
+
+    Duplicates (the same line seen in several places) are dropped, single-character noise and low-confidence
+    readings are skipped, and the order is the order in which the text appears in the video.
+    -> [{"text","start","end","confidence","narration": "The text on screen reads: ..."}]"""
+    queue: List[dict] = []
+    seen = set()
+    for seg in sorted(segments, key=lambda s: (float(s["start"]), -float(s.get("confidence", 1.0)))):
+        text = re.sub(r"\s+", " ", str(seg["text"])).strip(" .")
+        key = _norm(text)
+        if not key or key in seen or len(re.findall(r"\w", text)) < min_word_chars:
+            continue
+        if float(seg.get("confidence", 1.0)) < min_confidence:
+            continue
+        seen.add(key)
+        queue.append({"text": text, "start": float(seg["start"]), "end": float(seg["end"]),
+                      "confidence": float(seg.get("confidence", 1.0)), "narration": f"The text on screen reads: {text}."})
+        if len(queue) >= max_lines:
+            break
+    return queue
 
 
 def screen_text_in_range(segments: Sequence[Segment], start: float, end: float) -> List[str]:

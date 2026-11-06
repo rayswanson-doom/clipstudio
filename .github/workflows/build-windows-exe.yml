@@ -2,9 +2,18 @@ name: Build Windows exe
 
 # Run it by hand: Actions tab -> "Build Windows exe" -> Run workflow.
 # It builds on a free GitHub Windows machine, starts the finished exe to prove it
-# boots, and publishes CinePulseAI-3D-Studio-Portable.zip (validated, then unzipped and tested exactly as a user would use it).
+# boots, and publishes CinePulseAI-Ultimate-Portable.zip (validated, then unzipped and tested exactly as a user would use it).
 on:
   workflow_dispatch:
+    inputs:
+      bundle_paddleocr:
+        description: "Also bundle PaddleOCR (adds ~0.5 GB)"
+        type: boolean
+        default: false
+      bundle_torch:
+        description: "Also bundle PyTorch (adds 1-2 GB; the release upload limit is 2 GB)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write   # lets the last step publish the zip as a (private) release
@@ -31,6 +40,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-build.txt
 
+      - name: Install the optional engines that were asked for
+        shell: pwsh
+        run: |
+          if ("${{ inputs.bundle_paddleocr }}" -eq "true") { pip install paddlepaddle paddleocr }
+          if ("${{ inputs.bundle_torch }}" -eq "true") { pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu }
+
       - name: Write token.json from secret (optional)
         if: ${{ env.GOOGLE_TOKEN_JSON != '' }}
         shell: python
@@ -39,15 +54,20 @@ jobs:
           open("token.json", "w", encoding="utf-8").write(os.environ["GOOGLE_TOKEN_JSON"])
 
       - name: Build the app and the final zip (downloads ffmpeg + models, then validates the zip)
-        run: python build_exe.py --ci
+        shell: pwsh
+        run: |
+          $extra = @()
+          if ("${{ inputs.bundle_paddleocr }}" -eq "true") { $extra += "--with-paddleocr" }
+          if ("${{ inputs.bundle_torch }}" -eq "true") { $extra += "--with-torch" }
+          python build_exe.py --ci @extra
 
       - name: Unzip the FINAL zip into a clean folder (this is what the user receives)
         shell: pwsh
         run: |
-          python build_exe.py --validate-zip dist\CinePulseAI-3D-Studio-Portable.zip
+          python build_exe.py --validate-zip dist\CinePulseAI-Ultimate-Portable.zip
           $pkg = Join-Path $env:RUNNER_TEMP "pkg"
           New-Item -ItemType Directory -Force $pkg | Out-Null
-          tar -xf dist\CinePulseAI-3D-Studio-Portable.zip -C $pkg
+          tar -xf dist\CinePulseAI-Ultimate-Portable.zip -C $pkg
           if (-not (Test-Path "$pkg\CinePulseAI\CinePulseAI.exe")) { throw "CinePulseAI.exe missing after unzip" }
           Get-ChildItem "$pkg\CinePulseAI" | Select-Object Name | Format-Table -HideTableHeaders
 
@@ -79,8 +99,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: CinePulseAI-3D-Studio-Portable
-          path: dist/CinePulseAI-3D-Studio-Portable.zip
+          name: CinePulseAI-Ultimate-Portable
+          path: dist/CinePulseAI-Ultimate-Portable.zip
           retention-days: 14
           compression-level: 0
 
@@ -90,4 +110,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "build-$env:GITHUB_RUN_NUMBER"
-          gh release create $tag "dist/CinePulseAI-3D-Studio-Portable.zip" --repo $env:GITHUB_REPOSITORY --title "CinePulse AI build $env:GITHUB_RUN_NUMBER" --notes "Windows build. Download CinePulseAI-3D-Studio-Portable.zip, unzip it, double-click CinePulseAI.exe inside the CinePulseAI folder. No installation and no internet needed for the core features."
+          gh release create $tag "dist/CinePulseAI-Ultimate-Portable.zip" --repo $env:GITHUB_REPOSITORY --title "CinePulse AI build $env:GITHUB_RUN_NUMBER" --notes "Windows build. Download CinePulseAI-Ultimate-Portable.zip, unzip it, double-click CinePulseAI.exe inside the CinePulseAI folder. No installation and no internet needed for the core features."

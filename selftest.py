@@ -27,7 +27,7 @@ MODULES = [
     "google_auth_oauthlib.flow", "google.oauth2.credentials", "yt_dlp", "edge_tts",
     "pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine", "avatar_sync",
     "ocr_engine", "visual_cues", "rapidocr_onnxruntime",
-    "avatar_3d_engine", "glb_model", "soft_raster", "lipsync_en", "avatar_gestures", "demo_avatars",
+    "avatar_3d_engine", "glb_model", "soft_raster", "lipsync_en", "avatar_gestures", "demo_avatars", "render_engine",
 ]
 
 
@@ -171,6 +171,24 @@ def check_avatar_3d() -> str:
     return f"{res['frames']} frames, {res['lip_sync']} lip-sync, placed at {placed['rect'][:2]}"
 
 
+def check_render_engine() -> str:
+    """Compose a video from tracks: voiceover + animated backdrop + timed on-screen text (render_engine)."""
+    import render_engine
+    import video_engine
+
+    with tempfile.TemporaryDirectory() as d:
+        wav, out = os.path.join(d, "v.wav"), os.path.join(d, "o.mp4")
+        ff = video_engine.find_ffmpeg()
+        subprocess.run([ff, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=300:duration=1.5", wav],
+                       check=True, timeout=60, creationflags=_flags())
+        res = render_engine.render_commentary(wav, out, None, None,
+                                              screen_segments=[{"text": "SELF TEST", "start": 0.2, "end": 1.2}],
+                                              size=(270, 480), fps=20, ffmpeg_path=ff)
+        if os.path.getsize(out) < 1000 or res["frames"] < 25:
+            raise RuntimeError(f"composed video is empty or short: {res}")
+    return f"{res['frames']} frames, tracks: {sorted({t['track'] for t in res['tracks']})}"
+
+
 def check_ocr() -> str:
     """Read burned-in text from a rendered video with the real OCR engine, then unload it again."""
     import cv2
@@ -256,6 +274,7 @@ def run_all(app_path: Optional[Path] = None, log: Callable[[str], None] = print)
         ("clip pipeline", "fail", check_clip_pipeline),
         ("avatar lip-sync", "fail", check_avatar),
         ("3D avatar + podcast layout", "fail", check_avatar_3d),
+        ("multi-track render engine", "fail", check_render_engine),
         ("on-screen text (OCR)", "fail", check_ocr),
         ("visual action cues", "fail", check_cues),
         ("app page", "fail", lambda: check_app_page(app_path)),

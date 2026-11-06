@@ -329,6 +329,40 @@ class ViewmaxTabTests(unittest.TestCase):
         self.assertEqual((kw["custom_script"], kw["action_prompt"], kw["read_background_text"]),
                          ("My own words.", "Zoom in then pan right", True))
 
+    def test_ocr_reader_captions_music_and_backdrop_controls(self):
+        f = run_app(FakeSt())
+        keys = {c[2]["key"] for c in f.names("selectbox")} | {c[2]["key"] for c in f.names("checkbox")} | {
+            c[2]["key"] for c in f.names("file_uploader")}
+        for key in ("viewmax_ocr_backend", "viewmax_show_text", "viewmax_music", "viewmax_backdrop"):
+            self.assertIn(key, keys)
+        music = FakeUpload()
+        music.name = "bed.mp3"
+        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
+            run_app(FakeSt({"viewmax_prompt": "p", "viewmax_read_text": True, "viewmax_ocr_backend": "PaddleOCR",
+                            "viewmax_show_text": False, "viewmax_music": music, "viewmax_backdrop": "Sunset"},
+                           clicked=["viewmax_run"]))
+        kw = rv.call_args[1]
+        self.assertEqual((kw["ocr_backend"], kw["show_screen_text"], kw["broll_style"]), ("paddleocr", False, "sunset"))
+        self.assertTrue(kw["music_path"].endswith("bed.mp3"))
+
+    def test_clip_tab_ocr_reader_is_forwarded(self):
+        with mock.patch.object(pipeline, "run_vugola_pipeline", return_value=VUGOLA) as rv:
+            run_app(FakeSt({"vugola_url": "http://x/y.mp4", "vugola_ocr": True, "vugola_ocr_backend": "PaddleOCR"},
+                           clicked=["vugola_run"]))
+        self.assertEqual(rv.call_args[1]["ocr_backend"], "paddleocr")
+
+    def test_defaults_do_not_send_optional_render_arguments(self):
+        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
+            run_app(FakeSt({"viewmax_prompt": "p"}, clicked=["viewmax_run"]))
+        for k in ("ocr_backend", "show_screen_text", "music_path", "broll_style"):
+            self.assertNotIn(k, rv.call_args[1])
+
+    def test_motion_css_is_gsap_style_and_respects_reduced_motion(self):
+        css = Path(APP).read_text(encoding="utf-8")
+        for needle in ("cubic-bezier(.215,.61,.355,1)", "cubic-bezier(.34,1.56,.64,1)", "@keyframes cp-rise",
+                       "prefers-reduced-motion"):
+            self.assertIn(needle, css)
+
     def test_custom_script_alone_is_enough_without_a_prompt(self):
         with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
             f = run_app(FakeSt({"viewmax_script": "Just my script."}, clicked=["viewmax_run"]))

@@ -134,6 +134,75 @@ class PodcastPipelineTests(unittest.TestCase):
             self.go("b", avatar_image=bad)
         self.assertEqual(FakeVoice.calls, [])  # nothing was synthesised
 
+    def _bg(self, name="bg.mp4", secs=2):
+        import subprocess
+        path = os.path.join(self.dir.name, name)
+        subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"testsrc2=s=320x240:r=25:d={secs}",
+                        "-pix_fmt", "yuv420p", path], check=True)
+        return path
+
+    SEGS = [{"text": "SALE ENDS TODAY", "start": 0.2, "end": 1.6, "confidence": 0.9},
+            {"text": "Free shipping", "start": 0.4, "end": 1.8, "confidence": 0.8}]
+
+    def test_ocr_text_is_narrated_shown_and_uploaded_without_an_avatar(self):
+        bg = self._bg()
+        with mock.patch.object(pipeline.ocr_engine, "extract_screen_text", return_value=self.SEGS) as ex:
+            res, up, out = self.go("o", background_video=bg, read_background_text=True, avatar_enabled=False,
+                                   ocr_backend="paddleocr")
+        self.assertEqual(ex.call_args[1]["backend"], "paddleocr")
+        self.assertEqual(res["screen_text"], ["SALE ENDS TODAY", "Free shipping"])
+        self.assertEqual([q["text"] for q in res["screen_queue"]], ["SALE ENDS TODAY", "Free shipping"])
+        self.assertIn("The text on screen reads: SALE ENDS TODAY.", res["script"]["script"])
+        up.assert_called_once()
+        info = probe(res["video_path"])
+        self.assertTrue(any(s["codec_type"] == "audio" for s in info["streams"]))
+        self.assert_clean(out)
+
+    def test_captions_can_be_switched_off(self):
+        bg = self._bg("bg2.mp4")
+        seen = {}
+        real = pipeline.render_engine.render_commentary
+
+        def spy(*a, **k):
+            seen.update(k)
+            return real(*a, **k)
+
+        with mock.patch.object(pipeline.ocr_engine, "extract_screen_text", return_value=self.SEGS), \
+                mock.patch.object(pipeline.render_engine, "render_commentary", side_effect=spy):
+            self.go("n", background_video=bg, read_background_text=True, show_screen_text=False, avatar_enabled=False)
+            self.assertEqual(seen, {})  # nothing to compose: plain merge path
+            self.go("y", background_video=bg, read_background_text=True, show_screen_text=True, avatar_enabled=False)
+        self.assertEqual(len(seen["screen_segments"]), 2)
+
+    def test_avatar_background_ocr_all_tracks(self):
+        bg = self._bg("bg3.mp4")
+        with mock.patch.object(pipeline.ocr_engine, "extract_screen_text", return_value=self.SEGS):
+            res, up, out = self.go("all", background_video=bg, read_background_text=True, avatar_image="demo:anime",
+                                   avatar_type="anime", avatar_position="Top-Right")
+        rows = {r["track"] for r in res["avatar"]["tracks"]} if "tracks" in res["avatar"] else set()
+        self.assertEqual(res["avatar"]["layout"]["preset"], "Top-Right")
+        self.assertEqual(res["screen_text"][0], "SALE ENDS TODAY")
+        up.assert_called_once_with(res["video_path"], "FOLD")
+        self.assert_clean(out)
+
+    def test_music_and_backdrop_style(self):
+        import subprocess
+        music = os.path.join(self.dir.name, "bed.wav")
+        subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=90:duration=1", music], check=True)
+        res, _, out = self.go("mu", avatar_enabled=False, music_path=music, broll_style="sunset")
+        self.assertTrue(os.path.isfile(res["video_path"]))
+        v = next(s for s in probe(res["video_path"])["streams"] if s["codec_type"] == "video")
+        self.assertEqual((v["width"], v["height"]), (1080, 1920))
+
+    def test_composition_failure_falls_back_to_simple_layout(self):
+        with mock.patch.object(pipeline.render_engine, "render_commentary", side_effect=RuntimeError("kaput")):
+            res, up, out = self.go("fb", avatar_image="demo:ai", avatar_position="Bottom-Right")
+        self.assertTrue(any("multi-track renderer failed" in w for w in res["warnings"]))
+        self.assertEqual(res["avatar"]["layout"]["preset"], "Bottom-Right")  # ffmpeg PiP fallback still placed it
+        self.assertTrue(os.path.isfile(res["video_path"]))
+        up.assert_called_once()
+        self.assert_clean(out)
+
     def test_drive_failure_keeps_video(self):
         out = os.path.join(self.dir.name, "d")
         with mock.patch.object(pipeline, "generate_voiceover", FakeVoice.generate), mock.patch.object(

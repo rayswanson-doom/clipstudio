@@ -34,8 +34,8 @@ Time: ~15 min of your clicking + 30-60 min of waiting. Needs only a web browser.
    the models, builds with PyInstaller, then **starts the finished exe and checks it answers**
    (the smoke test) before saving anything.
 6. **Download**: when the run is green, scroll to **Artifacts** at the bottom of the run page ->
-   click **CinePulseAI-3D-Studio-Portable**. GitHub wraps it once more, so you unzip twice:
-   download -> unzip -> inside is `CinePulseAI-3D-Studio-Portable.zip` -> unzip that -> folder `CinePulseAI`.
+   click **CinePulseAI-Ultimate-Portable**. GitHub wraps it once more, so you unzip twice:
+   download -> unzip -> inside is `CinePulseAI-Ultimate-Portable.zip` -> unzip that -> folder `CinePulseAI`.
 7. **Run**: open the `CinePulseAI` folder, double-click **CinePulseAI.exe**. Wait 10-40 seconds on
    first start; your browser opens the app. If Windows SmartScreen warns about an unknown publisher:
    *More info -> Run anyway* (it is your own program).
@@ -84,7 +84,7 @@ Needs a PC that can handle ~5 GB of downloads and a long build.
 3. Preview the build (changes nothing):  `python build_exe.py --dry-run`
 4. Build:  `python build_exe.py`
    It downloads `ffmpeg.exe`, the face model and the Whisper model automatically if missing, then writes
-   `dist\CinePulseAI\` and `dist\CinePulseAI-3D-Studio-Portable.zip`.
+   `dist\CinePulseAI\` and `dist\CinePulseAI-Ultimate-Portable.zip`.
    - Use `--no-token` to leave `token.json` out. `--no-download` stops all downloads (you must then
      supply `bin\ffmpeg.exe` yourself).
 5. Run `dist\CinePulseAI\CinePulseAI.exe` (or send the zip to any Windows laptop).
@@ -136,3 +136,23 @@ Mixamo, most humanoid exports) or `.vrm` (VRoid) file. With no upload the built-
   re-export without compression). Fingers are not posed; thumbs-up / OK are arm poses.
 - Finished videos are backed up to Google Drive automatically when a Folder ID is set.
 - `python build_exe.py --with-torch` additionally bundles PyTorch (+1-2 GB). Nothing in the app needs it today.
+
+## Multi-track render engine, richer scripts, OCR (Ultimate build)
+
+`backend/render_engine.py` composes the final video from tracks aligned to the voiceover (patterns from Remotion,
+Revideo, GSAP and Motion Canvas, re-implemented in Python so it runs on a CPU laptop):
+B-roll (your background video, or an animated backdrop when there is none) -> OCR text overlays -> the 3D avatar in a
+rounded, framed corner -> voiceover + optional music (ducked under the voice). Overlays enter/leave with GSAP-style
+easings. If composition fails the app falls back to the simple ffmpeg layout, then to a plain voiceover video.
+
+- **OCR**: text read from the video frames is narrated (deduplicated, in order of appearance) and, optionally, shown as
+  captions at the moment it appears. "Text reader" chooses Auto (PaddleOCR when installed, else RapidOCR), PaddleOCR or RapidOCR.
+- **Scripts** can be written like a screenplay: `SCENE 1: Hook`, `NARRATOR:` labels, `VISUAL:` / `(parenthesis)` / `> ` direction
+  lines, `[m:ss]` timecodes (a direction pinned to that second), `[pause 1s]` and inline `[directions]`. Directions apply to
+  the next spoken sentence.
+- **Not included**: LTX-Video (a GPU diffusion model) cannot run on a CPU laptop; the app reports its status and uses the
+  animated backdrop instead. Remotion, GSAP, Motion Canvas and Manim are JavaScript / LaTeX toolchains; their *ideas* (frame-based
+  composition, easings, timelines, procedural motion graphics) are re-implemented, their code is not bundled.
+- **Big optional engines**: `python build_exe.py --with-paddleocr`, `--with-torch` or `--ultimate` (both) bundle PaddleOCR and/or PyTorch
+  (+0.5 and +1-2 GB; GitHub releases accept at most 2 GB per file). In GitHub Actions use the two checkboxes when you press
+  "Run workflow". Nothing in the app needs them today: the default build already reads text with RapidOCR (the PP-OCR models).
