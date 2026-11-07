@@ -34,6 +34,7 @@ jobs:
         run: python -m pytest -q tests --ignore=tests/ui -p no:cacheprovider -rs
       - uses: actions/upload-artifact@v4
         if: always()
+        continue-on-error: true
         with:
           name: ui-screenshots
           path: tests/ui/screenshots

@@ -98,6 +98,7 @@ jobs:
           Write-Host "Smoke test passed: the exe started and the app answered."
 
       - uses: actions/upload-artifact@v4
+        continue-on-error: true  # a full artifact quota must not block the release below
         with:
           name: CinePulseAI-Ultimate-Portable
           path: dist/CinePulseAI-Ultimate-Portable.zip
