@@ -131,15 +131,15 @@ VIEWMAX = {"script": {"script": "Hello there", "word_count": 2, "estimated_secon
 
 
 class StructureTests(unittest.TestCase):
-    def test_two_tabs_and_sidebar_folder_field(self):
+    def test_three_tabs_and_sidebar_folder_field(self):
         f = run_app(FakeSt())
-        self.assertEqual(f.tab_labels, ["🎬 Clip Repurposer Studio", "⚡ AI Generator Lab"])
+        self.assertEqual(f.tab_labels, ["🎬 Clip Repurposer Studio", "⚡ AI Generator Lab", "🎞️ Story Studio"])
         labels = [c[1][0] for c in f.names("text_input")]
         self.assertIn("Google Drive Folder ID", labels)
         self.assertIn("YouTube URL", labels)
         self.assertEqual(f.names("text_area")[0][1][0], "What should the video be about?")
         buttons = [c[1][0] for c in f.names("button")]
-        self.assertEqual(buttons, ["Generate viral clips", "Generate video"])
+        self.assertEqual(buttons, ["Generate viral clips", "Generate video", "Plan the story"])
         self.assertEqual(f.names("set_page_config")[0][2]["layout"], "wide")
 
     def test_token_status_in_sidebar(self):
@@ -211,6 +211,49 @@ class VugolaTabTests(unittest.TestCase):
         self.assertTrue(any("No Google Drive" in c[1][0] for c in f.names("warning")))
         self.assertTrue(any("drive down" in c[1][0] for c in f.names("error")))
         self.assertFalse(f.names("link_button"))
+
+
+STORY = {"plan": {"title": "T"}, "script": "INT. A - DAY\n", "warnings": [], "issues": [], "trace": [{"agent": "Director", "note": "n"}],
+         "characters": [{"name": "Bob", "visual_identifier": "tall"}], "drift": [], "project_dir": "/tmp/p", "video_path": "/tmp/s.mp4",
+         "drive_link": "https://drive/s",
+         "storyboard": {"total_duration": 3.0, "shots": [{"idx": 0, "start": 0.0, "end": 3.0, "shot_type": "wide", "camera_angle": "eye",
+                                                           "camera_movement": "static", "characters": ["Bob"], "camera_prompt": "cp"}]}}
+
+
+class StoryTabTests(unittest.TestCase):
+    def test_controls_exist(self):
+        f = run_app(FakeSt())
+        keys = {c[2]["key"] for c in f.names("selectbox")} | {c[2]["key"] for c in f.names("text_area")}
+        self.assertTrue({"story_mode", "story_text", "story_provider", "story_style"} <= keys)
+        up = [c for c in f.names("file_uploader") if c[2]["key"] == "story_file"]
+        self.assertEqual(up[0][2]["type"], ["txt", "md", "fountain"])
+
+    def test_empty_text_warns_and_does_not_run(self):
+        with mock.patch.object(pipeline, "run_story_pipeline", return_value=STORY) as rs:
+            f = run_app(FakeSt(clicked=["story_run"]))
+        rs.assert_not_called()
+        self.assertTrue(any("Type or upload" in c[1][0] for c in f.names("warning")))
+
+    def test_run_forwards_options_and_shows_results(self):
+        with mock.patch.object(pipeline, "run_story_pipeline", return_value=STORY) as rs:
+            f = run_app(FakeSt({"story_text": "INT. A - DAY\n\nBOB\nHi\n", "story_mode": "Screenplay → video (Script2Video)",
+                                "story_provider": "Groq (needs an API key)", "story_api_key": " k ", "story_style": "Anime",
+                                "story_seconds": 30, "drive_folder_id": "F"}, clicked=["story_run"]))
+        args, kw = rs.call_args
+        self.assertEqual(kw["mode"], "script2video")
+        self.assertEqual((kw["provider"], kw["api_key"], kw["style"], kw["folder_id"]), ("groq", "k", "anime", "F"))
+        self.assertEqual(kw["target_seconds"], 30.0)
+        self.assertEqual(f.names("video")[-1][1][0], "/tmp/s.mp4")
+
+    def test_offline_never_sends_the_key(self):
+        with mock.patch.object(pipeline, "run_story_pipeline", return_value=STORY) as rs:
+            run_app(FakeSt({"story_text": "x", "story_api_key": "leftover"}, clicked=["story_run"]))
+        self.assertEqual((rs.call_args[1]["provider"], rs.call_args[1]["api_key"]), ("offline", None))
+
+    def test_pipeline_error_is_shown(self):
+        with mock.patch.object(pipeline, "run_story_pipeline", side_effect=ValueError("bad text")):
+            f = run_app(FakeSt({"story_text": "x"}, clicked=["story_run"]))
+        self.assertTrue(any("bad text" in c[1][0] for c in f.names("error")))
 
 
 class ViewmaxTabTests(unittest.TestCase):
@@ -285,14 +328,14 @@ class ViewmaxTabTests(unittest.TestCase):
         inputs = {"viewmax_prompt": "p", "viewmax_avatar_on": True, "viewmax_position": "Custom Coordinates",
                   "viewmax_x": 120, "viewmax_y": 800}
         f = run_app(FakeSt(inputs))
-        self.assertEqual({c[2]["key"] for c in f.names("number_input")}, {"viewmax_x", "viewmax_y"})
+        self.assertEqual({c[2]["key"] for c in f.names("number_input") if c[2]["key"].startswith("viewmax")}, {"viewmax_x", "viewmax_y"})
         with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
             run_app(FakeSt(inputs, clicked=["viewmax_run"]))
         self.assertEqual(rv.call_args[1]["avatar_xy"], (120, 800))
 
     def test_x_y_hidden_for_corner_presets(self):
         f = run_app(FakeSt({"viewmax_avatar_on": True, "viewmax_position": "Bottom-Left"}))
-        self.assertEqual(f.names("number_input"), [])
+        self.assertEqual([c for c in f.names("number_input") if c[2]["key"].startswith("viewmax")], [])
 
     def test_layout_preview_is_shown_only_when_the_avatar_is_on(self):
         self.assertFalse(any("Layout preview" in str(c) for c in run_app(FakeSt()).names("image")))

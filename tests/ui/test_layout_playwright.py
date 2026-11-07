@@ -174,6 +174,7 @@ class LayoutTests(unittest.TestCase):
         page = self.open()
         self.assertTrue(page.get_by_role("tab", name="🎬 Clip Repurposer Studio").is_visible())
         self.assertTrue(page.get_by_role("tab", name="⚡ AI Generator Lab").is_visible())
+        self.assertTrue(page.get_by_role("tab", name="🎞️ Story Studio").is_visible())
         sidebar = page.locator('[data-testid="stSidebar"]')
         self.assertTrue(sidebar.get_by_label("Google Drive Folder ID", exact=True).is_visible())
         page.screenshot(path=str(SHOTS / "desktop_clips.png"), full_page=True)

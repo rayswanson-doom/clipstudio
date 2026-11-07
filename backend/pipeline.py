@@ -504,3 +504,86 @@ def run_viewmax_pipeline(
         }
     finally:
         release_memory(not keep_models)
+
+
+def run_story_pipeline(
+    source: str,
+    mode: str = "script2video",
+    folder_id: Optional[str] = None,
+    output_dir: str = "outputs",
+    progress: Optional[ProgressCb] = None,
+    ffmpeg_path: Optional[str] = None,
+    provider: str = "offline",
+    api_key: Optional[str] = None,
+    style: str = "human",
+    target_seconds: float = 45.0,
+    episode: int = 1,
+    episodes: Optional[int] = None,
+    max_shots: Optional[int] = None,
+    render: bool = True,
+    voice: bool = False,
+    voice_name: str = DEFAULT_VOICE,
+    size: tuple = (540, 960),
+    fps: int = 20,
+    transport=None,
+) -> dict:
+    """Idea / screenplay / novel -> multi-shot storyboard (+ optional CPU animatic), on any computer (no GPU).
+
+    The ViMax-style agents (backend/vimax_orchestrator.py) run first; `provider` "offline" uses built-in rules,
+    "groq" / "gemini" / "auto" ask that LLM for structured JSON (falls back to the rules with a warning when the
+    key is missing or the call fails). The API key is used only for that call and is never stored or returned.
+    Returns {"plan","script","characters","storyboard","graph","issues","trace","warnings","project_dir",
+    "video_path","drift","drive_link", ...}.
+    """
+    try:
+        from . import vimax_orchestrator as vo
+    except ImportError:  # pragma: no cover
+        import vimax_orchestrator as vo
+
+    warnings: list = []
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        llm = vo.make_client(provider, api_key, **({"transport": transport} if transport else {}))
+    except vo.LLMError as exc:
+        warnings.append(f"{exc} Used the built-in rules instead.")
+        llm = vo.OfflineClient()
+    _emit(progress, "Planning the story", 0.02)
+    result = vo.ViMaxOrchestrator(llm, progress=lambda f, m: _emit(progress, m, 0.02 + 0.38 * f)).run(
+        source, mode=mode, style=style, target_seconds=target_seconds, episode=episode, episodes=episodes,
+        max_shots=max_shots)
+    warnings.extend(result["warnings"])
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    name = f"story_{_safe_name(result['plan'].get('title') or 'story', 30)}_{stamp}"
+    project_dir = out_dir / name
+    vo.save_project(result, str(project_dir))
+    video_path, drift, drive_link = None, [], None
+    if render:
+        _emit(progress, "Rendering the animatic (CPU)", 0.42)
+        try:
+            rr = vo.render_storyboard(
+                result, str(out_dir / f"{name}.mp4"), work_dir=str(project_dir / "work"), size=tuple(size), fps=fps,
+                voice=voice, voice_name=voice_name, ffmpeg_path=ffmpeg_path,
+                progress=lambda f, m: _emit(progress, m, 0.42 + 0.46 * f))
+            video_path, drift = rr["output_path"], rr["drift"]
+            warnings.extend(w for w in rr["warnings"] if w not in warnings)
+            bad = [d for d in drift if d["status"] != "ok"]
+            if bad:
+                warnings.append(f"Appearance drift was measured in {len(bad)} shot(s); see the drift report.")
+        except Exception as exc:  # the plan is still valuable when rendering fails
+            logger.warning("story render failed: %s", exc)
+            warnings.append(f"The video could not be rendered ({exc}). The storyboard files were still saved.")
+    if video_path and folder_id is not None:
+        folder = _usable_folder(folder_id, warnings)
+        if folder:
+            _emit(progress, "Backing up to Google Drive", 0.92)
+            try:
+                with DriveBackup(folder, upload_fn=upload_to_google_drive) as backup:
+                    drive_link = backup.submit(video_path).result()
+            except Exception as exc:
+                logger.warning("Drive backup failed: %s", exc)
+                warnings.append(f"Google Drive backup failed ({exc}). Your video is saved on this computer.")
+    _emit(progress, "Done", 1.0)
+    result.update({"warnings": warnings, "project_dir": str(project_dir), "video_path": video_path, "drift": drift,
+                   "drive_link": drive_link, "rendered": bool(video_path)})
+    return result

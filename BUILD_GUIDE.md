@@ -156,3 +156,23 @@ easings. If composition fails the app falls back to the simple ffmpeg layout, th
 - **Big optional engines**: `python build_exe.py --with-paddleocr`, `--with-torch` or `--ultimate` (both) bundle PaddleOCR and/or PyTorch
   (+0.5 and +1-2 GB; GitHub releases accept at most 2 GB per file). In GitHub Actions use the two checkboxes when you press
   "Run workflow". Nothing in the app needs them today: the default build already reads text with RapidOCR (the PP-OCR models).
+
+## Story Studio (ViMax-style agents, CPU only)
+
+The **Story Studio** tab turns an idea, a screenplay or a novel into a storyboard and a preview video. Nothing needs a GPU.
+
+| Module | Role |
+|---|---|
+| `backend/vimax_orchestrator.py` | Director, Screenwriter, Character Extractor, Storyboard Artist, Reference Selector and Consistency Checker, plus the Groq / Gemini structured-JSON clients and the CPU animatic renderer |
+| `backend/script_parser.py` | Script2Video: INT./EXT. scenes, character cues, parentheticals and dialogue -> shots with exact timing and camera angle / movement / prompts |
+| `backend/novel_adapter.py` | Novel2Video: chapters -> beats (embedding-based) -> character profiles -> episodic screenplays |
+| `backend/dependency_graph.py` | Links each character's anchor portrait to every shot, passes each shot's last frame to the next, and measures appearance drift |
+
+- **No key needed.** "Offline" uses built-in rules. Choose Groq or Gemini and paste a key to let the model rewrite the script and
+  camera prompts as structured JSON; the key is used for that run only, is never saved or returned, and any failure falls back to
+  the rules with a warning.
+- **Embeddings.** Novels use a built-in hashed bag-of-words embedder. If `sentence-transformers` is installed the app uses
+  `all-MiniLM-L6-v2` instead (it is not bundled; it downloads about 90 MB on first use).
+- **What the preview is.** A stylised animatic: a painted portrait per character (the same one in every shot), a backdrop seeded from the
+  location, subtitles and keyframe continuity between shots. It is not photorealistic AI video; that needs a GPU.
+- The project (script, storyboard, characters, graph, subtitles) is saved next to the video in `outputs/story_*`.

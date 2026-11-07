@@ -46,7 +46,8 @@ APP_NAME = "CinePulseAI"
 
 BACKEND_MODULES = ["pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine", "avatar_sync",
                    "ocr_engine", "visual_cues", "avatar_3d_engine", "glb_model", "soft_raster", "lipsync_en",
-                   "avatar_gestures", "demo_avatars", "render_engine"]
+                   "avatar_gestures", "demo_avatars", "render_engine",
+                   "vimax_orchestrator", "novel_adapter", "script_parser", "dependency_graph"]
 REQUIRED_SOURCES = [
     "launcher.py", "selftest.py", "frontend/app.py",
     *[f"backend/{m}.py" for m in BACKEND_MODULES],

@@ -36,6 +36,7 @@ import uploader  # noqa: E402
 APP_NAME = "CinePulse AI"
 TAB_CLIP = "🎬 Clip Repurposer Studio"
 TAB_LAB = "⚡ AI Generator Lab"
+TAB_STORY = "🎞️ Story Studio"
 
 
 def _output_dir() -> Path:
@@ -59,6 +60,11 @@ AVATAR_TYPES = ["glb", "vrm", "jpg", "jpeg", "png"]  # 3D models first, pictures
 MODEL_TYPES = {"Photorealistic Human": "human", "AI Model": "ai", "Anime": "anime"}
 AUDIO_TYPES = ["mp3", "wav", "m4a", "ogg"]
 OCR_CHOICES = {"Auto (PaddleOCR if installed)": "auto", "PaddleOCR": "paddleocr", "RapidOCR (built in)": "rapidocr"}
+STORY_MODES = {"Idea → video": "idea2video", "Screenplay → video (Script2Video)": "script2video",
+               "Novel / long text → episode (Novel2Video)": "novel2video"}
+STORY_PROVIDERS = {"Offline - built-in rules (no key, no internet)": "offline", "Groq (needs an API key)": "groq",
+                   "Gemini (needs an API key)": "gemini"}
+STORY_TEXT_TYPES = ["txt", "md", "fountain"]
 BACKDROPS = {"Aurora (blue / magenta)": "aurora", "Sunset": "sunset", "Mono (dark grey)": "mono"}
 QUALITY_CHOICES = {"Balanced": "balanced", "Fast (low-spec laptops)": "fast", "High (slower, smoother edges)": "high"}
 VOICES = [
@@ -671,6 +677,98 @@ def render_lab_tab(folder_id: str) -> None:
                 st.link_button("Open in Google Drive", result["drive_link"])
 
 
+def render_story_tab(folder_id: str) -> None:
+    section_header("Story Studio",
+                   "Turn an idea, a screenplay or a novel into a consistent multi-shot storyboard, then an animatic. "
+                   "Runs on your CPU - no GPU needed.")
+    st.markdown(steps_html(["Director", "Screenwriter", "Characters", "Storyboard", "Consistency check", "Render"]),
+                unsafe_allow_html=True)
+    mode_label = st.selectbox("What are you starting from?", list(STORY_MODES), key="story_mode")
+    mode = STORY_MODES[mode_label]
+    hints = {"idea2video": "Describe the story in a few sentences.",
+             "script2video": "Paste a screenplay: INT./EXT. headings, CHARACTER names, (parentheticals) and dialogue.",
+             "novel2video": "Paste a chapter or a whole novel, or upload a .txt file below."}
+    text = st.text_area("Your text", key="story_text", height=200, placeholder=hints[mode])
+    upload = st.file_uploader("...or upload a text file", type=STORY_TEXT_TYPES, key="story_file")
+    with st.expander("Story options", expanded=False):
+        c1, c2 = st.columns(2)
+        with c1:
+            style_label = st.selectbox("Character style", list(MODEL_TYPES), key="story_style")
+            seconds = st.slider("Target length (seconds)", 15, 180, 45, key="story_seconds")
+        with c2:
+            provider_label = st.selectbox("Writing assistant", list(STORY_PROVIDERS), key="story_provider",
+                                          help="Offline uses fixed rules. Groq or Gemini can rewrite and enrich the "
+                                               "storyboard; only that text is sent to the provider.")
+            episode = st.number_input("Episode (novels)", 1, 50, 1, key="story_episode", disabled=mode != "novel2video")
+        api_key = st.text_input("API key (used for this run only, never saved)", value="", key="story_api_key",
+                                type="password", disabled=STORY_PROVIDERS[provider_label] == "offline")
+        render_on = st.checkbox("Also render a preview video", value=True, key="story_render")
+        voice_on = st.checkbox("Add a narrator voice (needs internet)", value=False, key="story_voice", disabled=not render_on)
+        st.caption("The preview is a stylised animatic: painted character portraits, location backdrops and subtitles, "
+                   "with each character looking the same in every shot. It is not photorealistic AI video.")
+
+    if st.button("Plan the story", type="primary", key="story_run"):
+        temp = []
+        try:
+            source = text
+            if upload is not None:
+                path = save_upload(upload)
+                temp.append(path)
+                import novel_adapter
+                source = novel_adapter.read_text_file(path)
+            if not source.strip():
+                st.warning("Type or upload some text first.")
+            else:
+                callback, bar = make_progress()
+                provider = STORY_PROVIDERS[provider_label]
+                st.session_state["story_result"] = pipeline.run_story_pipeline(
+                    source, mode=mode, folder_id=folder_id or None, output_dir=str(OUTPUT_DIR), progress=callback,
+                    provider=provider, api_key=(api_key.strip() or None) if provider != "offline" else None,
+                    style=MODEL_TYPES[style_label], target_seconds=float(seconds), episode=int(episode),
+                    render=bool(render_on), voice=bool(voice_on and render_on))
+        except Exception as exc:
+            st.session_state.pop("story_result", None)
+            st.error(f"Something went wrong: {exc}")
+        finally:
+            cleanup_uploads(temp)
+
+    result = st.session_state.get("story_result")
+    if not result:
+        return
+    show_warnings(result.get("warnings"))
+    shots = result["storyboard"]["shots"]
+    errors = [i for i in result["issues"] if i["severity"] == "error"]
+    st.markdown(stat_tiles([(len(shots), "Shots"), (f"{result['storyboard']['total_duration']:.1f}s", "Length"),
+                            (len(result["characters"]), "Characters"),
+                            ("Yes" if not errors else f"{len(errors)} left", "Consistency OK"),
+                            ("Yes" if result.get("drive_link") else "No", "Backed up to Drive")]), unsafe_allow_html=True)
+    if result.get("video_path"):
+        st.video(result["video_path"])
+        if result.get("drive_link"):
+            st.link_button("Open in Google Drive", result["drive_link"])
+    with st.container(border=True):
+        st.markdown('<div class="cp-clip-head"><span class="cp-rank">Characters</span></div>', unsafe_allow_html=True)
+        for c in result["characters"]:
+            st.markdown(f"**{_e(c['name'])}** - {_e(c['visual_identifier'])}")
+    with st.expander("Shot list", expanded=True):
+        for s in shots:
+            who = ", ".join(s["characters"]) or "-"
+            st.markdown(f"**{s['idx'] + 1}.** {s['start']:.1f}-{s['end']:.1f}s - {_e(s['shot_type'])}, "
+                        f"{_e(s['camera_angle'])}, {_e(s['camera_movement'])} - {_e(who)}")
+            st.caption(s["camera_prompt"])
+    with st.expander("Script"):
+        st.code(result["script"], language=None)
+    with st.expander("How the agents worked"):
+        for t in result["trace"]:
+            st.markdown(f"- **{_e(t['agent'])}** - {_e(t['note'])}")
+        for i in result["issues"]:
+            st.markdown(f"- {_e(i['severity'])}: {_e(i['message'])}")
+        if result.get("drift"):
+            worst = max(d["distance"] for d in result["drift"])
+            st.markdown(f"- Appearance drift check: worst distance {worst:.2f} over {len(result['drift'])} appearances")
+    st.caption(f"Project files saved in: {result['project_dir']}")
+
+
 # --------------------------------------------------------------------------- #
 def render_hero() -> None:
     st.markdown(
@@ -692,11 +790,13 @@ def main() -> None:
         st.session_state.setdefault("viewmax_result", DEMO_LAB)
     folder_id = render_sidebar()
     render_hero()
-    tab_clip, tab_lab = st.tabs([TAB_CLIP, TAB_LAB])
+    tab_clip, tab_lab, tab_story = st.tabs([TAB_CLIP, TAB_LAB, TAB_STORY])
     with tab_clip:
         render_clip_tab(folder_id)
     with tab_lab:
         render_lab_tab(folder_id)
+    with tab_story:
+        render_story_tab(folder_id)
     st.markdown(f'<div class="cp-foot">{APP_NAME} · everything runs locally · your files never leave this computer '
                 'except the Drive backup you enable</div>', unsafe_allow_html=True)
 

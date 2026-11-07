@@ -50,7 +50,7 @@ ProgressCb = Callable[[float], None]
 DEFAULT_SIZE = (1080, 1920)
 DEFAULT_FPS = 30
 ANIMATIONS = ("none", "fade", "slide_up", "slide_down", "slide_left", "slide_right", "pop", "zoom")
-BROLL_STYLES = ("aurora", "sunset", "mono")
+BROLL_STYLES = ("aurora", "sunset", "mono", "day", "night", "interior")
 Z_ORDER = {"broll": 0, "text": 10, "avatar": 20}
 
 
@@ -379,6 +379,9 @@ _PALETTES = {  # BGR
     "aurora": [(70, 20, 20), (180, 120, 20), (150, 60, 190), (200, 180, 60)],
     "sunset": [(40, 20, 50), (60, 70, 220), (120, 140, 250), (180, 60, 200)],
     "mono": [(26, 24, 24), (70, 66, 64), (110, 104, 100), (50, 48, 46)],
+    "day": [(200, 170, 120), (235, 215, 170), (170, 190, 120), (245, 235, 210)],      # sky blue / light
+    "night": [(40, 18, 12), (90, 40, 20), (70, 30, 60), (50, 50, 30)],               # deep navy
+    "interior": [(30, 40, 60), (60, 100, 170), (40, 70, 120), (90, 130, 190)],       # warm amber
 }
 
 
@@ -441,6 +444,23 @@ class _VideoReader:
 
     def close(self) -> None:
         self.cap.release()
+
+
+class _StillReader:
+    """A single image used as an always-available video frame."""
+
+    def __init__(self, path: str):
+        import cv2
+
+        self.img = cv2.imread(str(path))
+        if self.img is None:
+            raise ValueError(f"Could not open image: {path}")
+
+    def frame_at(self, t: float):
+        return self.img
+
+    def close(self) -> None:
+        pass
 
 
 def _video_seconds(ffmpeg: str, path: str) -> float:
@@ -522,7 +542,8 @@ class Composition:
                                "fade_out": fade_out, "loop": loop, "source_seconds": length}))
 
     def add_broll(self, source: Optional[str] = None, start: float = 0.0, end: Optional[float] = None,
-                  motion: str = "ken_burns", style: str = "aurora", fade: float = 0.0, loop: bool = True) -> Item:
+                  motion: str = "ken_burns", style: str = "aurora", fade: float = 0.0, loop: bool = True,
+                  seed: Optional[int] = None) -> Item:
         """Background clip: a video, a still image, or (source=None) the animated procedural backdrop.
         Overlapping clips cross-fade over their overlap; `fade` adds a fade-in at the clip start."""
         if motion not in ("ken_burns", "none"):
@@ -534,7 +555,7 @@ class Composition:
             kind = "image" if Path(source).suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".bmp") else "video"
         return self._add(Item("broll", start, end, Path(source).name if source else f"procedural:{style}",
                               {"source": source, "source_kind": kind, "motion": motion, "style": style, "fade": fade,
-                               "loop": loop}))
+                               "loop": loop, "seed": seed}))
 
     def add_text(self, text: str, start: float, end: Optional[float] = None, position="bottom",
                  animation: str = "slide_up", font_px: int = 0, group: str = "text", slot: int = 0,
@@ -587,14 +608,23 @@ class Composition:
         preset = _ve.normalize_position_preset(position)
         if preset == "Custom Coordinates" and xy is None:
             raise ValueError("Custom Coordinates needs an (X, Y) position in pixels.")
-        info = _ve._probe_media(self.ffmpeg, video)
+        is_image = Path(video).suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+        if is_image:  # a still portrait (e.g. a character anchor) shown for the whole clip
+            import cv2
+
+            img = cv2.imread(str(video))
+            if img is None:
+                raise RuntimeError("The avatar image could not be read.")
+            info = {"has_video": True, "width": img.shape[1], "height": img.shape[0], "duration": 0.0}
+        else:
+            info = _ve._probe_media(self.ffmpeg, video)
         if not info["has_video"] or info["width"] <= 0:
             raise RuntimeError("The avatar video could not be read.")
         rect = _ve.compute_pip_rect(self.size, (info["width"], info["height"]), preset, xy, scale)
         if end is None and info["duration"] > 0:
             end = start + info["duration"]
         return self._add(Item("avatar", start, end, Path(video).name,
-                              {"video": str(video), "preset": preset, "rect": rect, "animation": animation,
+                              {"video": str(video), "is_image": is_image, "preset": preset, "rect": rect, "animation": animation,
                                "border_color": border_color, "shadow": shadow, "source_seconds": info["duration"]}))
 
     # ---- checks --------------------------------------------------------- #
@@ -721,7 +751,9 @@ class Composition:
         av = next((i for i in self.items if i.kind == "avatar"), None)
         return {"output_path": str(out.resolve()), "duration": round(total, 2), "frames": n_frames, "fps": self.fps,
                 "size": self.size, "tracks": self.timeline_rows(), "warnings": warnings,
-                "avatar": None if av is None else {"preset": av.data["preset"], "rect": av.data["rect"]}}
+                "avatar": None if av is None else {"preset": av.data["preset"], "rect": av.data["rect"]},
+                "avatars": [{"name": i.name, "preset": i.data["preset"], "rect": i.data["rect"]}
+                            for i in self.items if i.kind == "avatar"]}
 
 
 class _FrameRenderer:
@@ -746,7 +778,7 @@ class _FrameRenderer:
         if key not in self._src:
             d = item.data
             if d["source_kind"] == "procedural":
-                self._src[key] = ProceduralBackground(self.c.size, d["style"], seed=7 + len(self._src))
+                self._src[key] = ProceduralBackground(self.c.size, d["style"], seed=d.get("seed") if d.get("seed") is not None else 7 + len(self._src))
             elif d["source_kind"] == "image":
                 import cv2
 
@@ -854,7 +886,7 @@ class _FrameRenderer:
             m = np.zeros((y1 - y0, x1 - x0, 1), np.float32)
             m[y - y0:y - y0 + h, x - x0:x - x0 + w, 0] = mask.astype(np.float32) / 255.0
             self._sprite[key] = (region[..., :3] * a1, a1, m, (x0, y0, x1, y1))
-            self._src[key] = _VideoReader(d["video"])
+            self._src[key] = _StillReader(d["video"]) if d.get("is_image") else _VideoReader(d["video"])
         return self._sprite[key]
 
     def _draw_avatar(self, canvas: np.ndarray, item: Item, t: float) -> None:

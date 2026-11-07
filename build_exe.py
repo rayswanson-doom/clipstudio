@@ -48,8 +48,8 @@ import build  # shared constants, preflight scan and helpers
 
 ROOT = Path(__file__).resolve().parent
 ZIP_NAME = "CinePulseAI-Ultimate-Portable.zip"
-COMMIT_MESSAGE = ("feat: integrate Remotion, Revideo, LTX-Video paradigms, advanced OCR, 3D avatar corner placement "
-                  "for human/anime models, and automated build")
+COMMIT_MESSAGE = ("feat: add ViMax-style multi-agent storyboard pipeline (Novel2Video, Script2Video, "
+                  "character consistency graph) running on CPU only")
 COMMIT_TRAILERS = (
     "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>",
     "Claude-Session: https://claude.ai/code/session_01DZZzH74mQWkTiSWum5df7Q",
@@ -252,7 +252,8 @@ def validate_zip(zip_path: Path, top: Optional[str] = None) -> List[str]:
             text = zf.read(app_py).decode("utf-8", "replace")
             for needle in ("CinePulse AI", "Clip Repurposer Studio", "AI Generator Lab",
                            "Enable AI Avatar Lip-Sync Commentary", "Your own script", "Visual actions",
-                           "Model type", "Avatar position", "Text reader (OCR)", "Animated backdrop"):
+                           "Model type", "Avatar position", "Text reader (OCR)", "Animated backdrop",
+                           "Story Studio", "Plan the story"):
                 if needle not in text:
                     problems.append(f"frontend/app.py in the zip lacks '{needle}'")
         if not any(n.startswith(f"{top}/") for n in names):

@@ -399,7 +399,7 @@ class GitPublishTests(unittest.TestCase):
         self.assertTrue(r["committed"] and r["pushed"])
         self.assertIn("a.py", r["files"])
         log = self.remote_log()
-        self.assertTrue(log.startswith("feat: integrate Remotion, Revideo, LTX-Video paradigms, advanced OCR, 3D avatar corner placement for human/anime models, and automated build"))
+        self.assertTrue(log.startswith("feat: add ViMax-style multi-agent storyboard pipeline (Novel2Video, Script2Video, character consistency graph) running on CPU only"))
         self.assertIn("Claude-Session:", log)
 
     def test_second_run_with_nothing_new_does_not_fail_or_commit(self):
@@ -476,7 +476,8 @@ class PackagingContentsTests(unittest.TestCase):
         self.assertIn("CinePulseAI-Ultimate-Portable.zip", wf)
 
     def test_3d_modules_are_bundled_and_torch_is_opt_in(self):
-        for m in ("avatar_3d_engine", "glb_model", "soft_raster", "lipsync_en", "avatar_gestures", "demo_avatars", "render_engine"):
+        for m in ("avatar_3d_engine", "glb_model", "soft_raster", "lipsync_en", "avatar_gestures", "demo_avatars", "render_engine",
+                  "vimax_orchestrator", "novel_adapter", "script_parser", "dependency_graph"):
             self.assertIn(f"backend/{m}.py", build.REQUIRED_SOURCES)
             self.assertTrue((ROOT / "backend" / f"{m}.py").is_file())
             self.assertIn(m, build_exe.pyinstaller_args(ROOT))

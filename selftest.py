@@ -28,6 +28,7 @@ MODULES = [
     "pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine", "avatar_sync",
     "ocr_engine", "visual_cues", "rapidocr_onnxruntime",
     "avatar_3d_engine", "glb_model", "soft_raster", "lipsync_en", "avatar_gestures", "demo_avatars", "render_engine",
+    "vimax_orchestrator", "novel_adapter", "script_parser", "dependency_graph",
 ]
 
 
@@ -189,6 +190,26 @@ def check_render_engine() -> str:
     return f"{res['frames']} frames, tracks: {sorted({t['track'] for t in res['tracks']})}"
 
 
+def check_story() -> str:
+    """Story Studio on the CPU: screenplay -> agents -> consistency graph -> 2-shot animatic (no network, no GPU)."""
+    import vimax_orchestrator as vo
+
+    script = "INT. KITCHEN - NIGHT\n\nBOB\nHello there.\n\nAMY\nHi Bob.\n"
+    r = vo.ViMaxOrchestrator(vo.OfflineClient()).run(script, mode="script2video")
+    errors = [i for i in r["issues"] if i["severity"] == "error"]
+    if errors or len(r["storyboard"]["shots"]) < 3:
+        raise RuntimeError(f"storyboard check failed: {errors or 'too few shots'}")
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "s.mp4")
+        res = vo.render_storyboard(r, out, work_dir=os.path.join(d, "w"), size=(180, 320), fps=8, max_shots=3)
+        if os.path.getsize(out) < 1000 or not res["drift"]:
+            raise RuntimeError(f"animatic is empty: {res}")
+        bad = [x for x in res["drift"] if x["status"] != "ok"]
+        if bad:
+            raise RuntimeError(f"character appearance drifted: {bad}")
+    return f"{len(r['storyboard']['shots'])} shots, {len(r['graph']['edges'])} graph edges, {len(res['drift'])} appearances consistent"
+
+
 def check_ocr() -> str:
     """Read burned-in text from a rendered video with the real OCR engine, then unload it again."""
     import cv2
@@ -275,6 +296,7 @@ def run_all(app_path: Optional[Path] = None, log: Callable[[str], None] = print)
         ("avatar lip-sync", "fail", check_avatar),
         ("3D avatar + podcast layout", "fail", check_avatar_3d),
         ("multi-track render engine", "fail", check_render_engine),
+        ("story studio (agents + consistency graph)", "fail", check_story),
         ("on-screen text (OCR)", "fail", check_ocr),
         ("visual action cues", "fail", check_cues),
         ("app page", "fail", lambda: check_app_page(app_path)),
