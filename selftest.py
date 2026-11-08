@@ -28,7 +28,7 @@ MODULES = [
     "pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine", "avatar_sync",
     "ocr_engine", "visual_cues", "rapidocr_onnxruntime",
     "avatar_3d_engine", "glb_model", "soft_raster", "lipsync_en", "avatar_gestures", "demo_avatars", "render_engine",
-    "vimax_orchestrator", "novel_adapter", "script_parser", "dependency_graph",
+    "vimax_orchestrator", "novel_adapter", "script_parser", "dependency_graph", "meme_matcher",
 ]
 
 
@@ -190,6 +190,37 @@ def check_render_engine() -> str:
     return f"{res['frames']} frames, tracks: {sorted({t['track'] for t in res['tracks']})}"
 
 
+def check_memes() -> str:
+    """Auto-meme matcher on the CPU: starter pack -> emotion match -> splice into a real video, all offline."""
+    import cv2
+    import numpy as np
+    import meme_matcher
+    import video_engine
+
+    with tempfile.TemporaryDirectory() as d:
+        ff = video_engine.find_ffmpeg()
+        meme_dir = os.path.join(d, "memes")
+        made = meme_matcher.ensure_starter_pack(meme_dir, ffmpeg_path=ff)
+        lib = meme_matcher.MemeLibrary(meme_dir, ffmpeg_path=ff).scan()
+        if len(lib.clips) < 5:
+            raise RuntimeError(f"starter pack is incomplete ({len(lib.clips)} clips)")
+        base = os.path.join(d, "base.mp4")
+        vw = cv2.VideoWriter(base, cv2.VideoWriter_fourcc(*"mp4v"), 10, (270, 480))
+        for _ in range(40):
+            vw.write(np.full((480, 270, 3), 60, np.uint8))
+        vw.release()
+        cfg = meme_matcher.MemeSettings(enabled=True, mode="overlay", min_score=0.2, max_per_minute=20)
+        plan = meme_matcher.plan_memes([{"start": 0.2, "end": 2.5, "text": "LOL that was hilarious!!"}], lib, cfg, 4.0,
+                                       frame_size=(270, 480))
+        if not plan["matches"] or plan["matches"][0]["emotion"] != "laugh":
+            raise RuntimeError(f"emotion matching failed: {plan}")
+        out = os.path.join(d, "out.mp4")
+        res = video_engine.splice_memes(base, out, plan["matches"], ffmpeg_path=ff)
+        if res["memes_applied"] != 1 or os.path.getsize(out) < 1000:
+            raise RuntimeError(f"splice failed: {res}")
+    return f"{len(lib.clips)} starter clips, laugh matched, reaction spliced"
+
+
 def check_story() -> str:
     """Story Studio on the CPU: screenplay -> agents -> consistency graph -> 2-shot animatic (no network, no GPU)."""
     import vimax_orchestrator as vo
@@ -311,6 +342,7 @@ def run_all(app_path: Optional[Path] = None, log: Callable[[str], None] = print)
         ("3D avatar + podcast layout", "fail", check_avatar_3d),
         ("multi-track render engine", "fail", check_render_engine),
         ("story studio (agents + consistency graph)", "fail", check_story),
+        ("auto-meme reactions", "fail", check_memes),
         ("on-screen text (OCR)", "fail", check_ocr),
         ("visual action cues", "fail", check_cues),
         ("app page", "fail", lambda: check_app_page(app_path)),

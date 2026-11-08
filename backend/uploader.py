@@ -365,6 +365,29 @@ def backup_files(paths, folder_id: str, upload_fn: Optional[Callable[[str, str],
     return out
 
 
+def collect_final_videos(result: dict) -> list:
+    """Every FINISHED video a pipeline result points to (clips, the classic generator's video, story episodes) -
+    the files that already contain meme reactions / the 3D avatar and are what gets backed up to Google Drive.
+    Existing files only, no duplicates, in order."""
+    found: list = []
+    for key in ("video_path", "output_path"):
+        if result.get(key):
+            found.append(result[key])
+    for clip in result.get("clips") or []:
+        if clip.get("output_path"):
+            found.append(clip["output_path"])
+    for ep in result.get("episodes_out") or []:
+        if ep.get("video_path"):
+            found.append(ep["video_path"])
+    seen, out = set(), []
+    for p in found:
+        p = str(p)
+        if p not in seen and os.path.isfile(p):
+            seen.add(p)
+            out.append(p)
+    return out
+
+
 def zip_folder(folder: str, zip_path: str, skip=("work",)) -> str:
     """Zip a project folder (script, storyboard, characters, graph, subtitles...) for backup, leaving out the
     scratch sub-folders named in `skip`. Returns zip_path."""

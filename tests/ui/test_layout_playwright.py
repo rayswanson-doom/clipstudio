@@ -242,6 +242,21 @@ class LayoutTests(unittest.TestCase):
         page.screenshot(path=str(SHOTS / "desktop_story_options.png"), full_page=True)
         page.close()
 
+    def test_meme_reaction_controls(self):
+        for mode in ("Clip Repurposer", "classic", None):
+            page = self.open(mode=mode) if mode else self.open()
+            page.get_by_text("Contextual meme reactions", exact=True).click()
+            box = page.get_by_text("Enable Contextual Meme Reactions")
+            box.wait_for(state="visible", timeout=10000)
+            page.get_by_text("Reaction clip library").wait_for(state="visible", timeout=10000)
+            page.get_by_role("button", name="Create the starter pack").wait_for(state="visible", timeout=10000)
+            self.assertTrue(page.get_by_label("Tile corner", exact=True).is_disabled())
+            box.click()
+            page.wait_for_function("""() => { const e = [...document.querySelectorAll('input')].find(
+                i => i.getAttribute('aria-label') === 'Tile corner'); return !!e && !e.disabled; }""", timeout=10000)
+            self.assert_no_horizontal_overflow(page)
+            page.close()
+
     def test_story_validation_message(self):
         page = self.open(mode="Script2Video")
         page.get_by_role("button", name="Create the video").click()

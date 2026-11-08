@@ -2,7 +2,7 @@
 build_exe.py  -  build the CinePulse AI Windows distribution with PyInstaller.
 
     python build_exe.py --dry-run     # scan + show the PyInstaller arguments, build nothing
-    python build_exe.py               # build dist/CinePulseAI/ and dist/CinePulseAI-ViMax-Portable.zip
+    python build_exe.py               # build dist/CinePulseAI/ and dist/CinePulseAI-Ultimate-Meme-Portable.zip
     python build_exe.py --ci          # same, for an unattended CI machine
     python build_exe.py --git-push    # ...then `git add .`, `git commit`, `git push origin main`
     python build_exe.py --git-only    # only the git step (no build)
@@ -47,9 +47,9 @@ from typing import List, Optional
 import build  # shared constants, preflight scan and helpers
 
 ROOT = Path(__file__).resolve().parent
-ZIP_NAME = "CinePulseAI-ViMax-Portable.zip"
-COMMIT_MESSAGE = ("feat: integrate ViMax multi-agent engine, Novel2Video, Script2Video, graph consistency, "
-                  "and automated build package")
+ZIP_NAME = "CinePulseAI-Ultimate-Meme-Portable.zip"
+COMMIT_MESSAGE = ("feat: integrate auto-meme reaction matcher inspired by meme-video-gen and sentrysearch, "
+                  "3D avatar positioning, OCR, ViMax engine, and automated build")
 COMMIT_TRAILERS = (
     "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>",
     "Claude-Session: https://claude.ai/code/session_01DZZzH74mQWkTiSWum5df7Q",
@@ -183,11 +183,12 @@ def finalize(app_dir: Path, root: Path = ROOT, include_token: bool = True) -> Li
         "Works offline: transcription, highlight scoring, face-tracked cropping, AI avatar lip-sync,\n"
         "story videos from an idea, a novel or a screenplay (Idea2Video / Novel2Video / Script2Video, CPU only),\n"
         "3D avatars (.glb / .vrm: phoneme lip-sync, head + upper-body gestures) shown in a podcast corner frame,\n"
-        "merging, and reading on-screen text (OCR). Needs internet: YouTube downloads, edge-tts voices, Google Drive backup.\n\n"
+        "merging, reading on-screen text (OCR), and contextual meme reactions (a reaction clip matched to the mood of\n"
+        "each line; put your own clips in the storage\\memes folder or use the in-app starter pack). Needs internet: YouTube downloads, edge-tts voices, Google Drive backup.\n\n"
         "GOOGLE DRIVE AUTO-BACKUP (optional)\n"
         "  The app runs fine without it - everything is saved in the 'outputs' folder here.\n"
         "  With a Folder ID set, every finished clip, avatar video and story episode (plus its project files) is\n"
-        "  uploaded automatically in the\n"
+        "  uploaded automatically (including videos with meme reactions and 3D avatars) in the\n"
         "  background (temporary network errors are retried). If Drive fails, your files stay on this computer.\n"
         "  token.json       -> put it in THIS folder (next to CinePulseAI.exe) for uploads with no sign-in.\n"
         "  credentials.json -> alternatively put your OAuth client file here; the first upload\n"
@@ -197,6 +198,14 @@ def finalize(app_dir: Path, root: Path = ROOT, include_token: bool = True) -> Li
            if (app_dir / build.TOKEN_REL).is_file() else ""),
         encoding="utf-8",
     )
+    memes = app_dir / "storage" / "memes"
+    memes.mkdir(parents=True, exist_ok=True)
+    (memes / "README.txt").write_text(
+        "Reaction clips for 'Enable Contextual Meme Reactions'.\n"
+        "Drop .mp4 / .mov / .webm / .gif clips here, or upload them inside the app (Generator Lab > Contextual meme reactions).\n"
+        "Put clips in a folder named after the mood (laugh, shock, sad, angry, cringe, confused, win, love, fear, cool),\n"
+        "or add a memes.json with tags. The app picks the clip whose mood matches each line of the video.\n",
+        encoding="utf-8")
     return copied
 
 
@@ -256,7 +265,8 @@ def validate_zip(zip_path: Path, top: Optional[str] = None) -> List[str]:
                            "Enable AI Avatar Lip-Sync Commentary", "Your own script", "Visual actions",
                            "Model type", "Avatar position", "Text reader (OCR)", "Animated backdrop",
                            "Creation mode", "Idea2Video", "Novel2Video", "Script2Video",
-                           "Character consistency", "Camera angle preferences", "Podcast corner avatar overlay"):
+                           "Character consistency", "Camera angle preferences", "Podcast corner avatar overlay",
+                           "Enable Contextual Meme Reactions"):
                 if needle not in text:
                     problems.append(f"frontend/app.py in the zip lacks '{needle}'")
         if not any(n.startswith(f"{top}/") for n in names):

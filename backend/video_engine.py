@@ -604,6 +604,102 @@ def build_pip_command(ffmpeg: str, base: str, avatar: str, deco_png: str, mask_p
     return cmd
 
 
+def splice_memes(input_path: str, output_path: str, matches, ffmpeg_path: Optional[str] = None,
+                 progress: Optional[Callable[[float], None]] = None, border: int = 3) -> dict:
+    """Lay reaction clips over a FINISHED video with ffmpeg alone (no frame-by-frame Python, so it is fast on a CPU).
+
+    `matches` come from meme_matcher.plan_memes(): each has meme_path, start, end, mode ("overlay" | "cutaway"), rect
+    (x, y, w, h in this video's pixels; overlays only), trim_start, use_audio, volume. An overlay is a bordered
+    secondary frame that fades in and out; a cutaway fills the picture (a transition frame) with a quick fade. The
+    clip's own sound is mixed over the video's audio. The original video's picture and sound are otherwise untouched.
+    Returns {"output_path","memes_applied","size","duration"}."""
+    ff = find_ffmpeg(ffmpeg_path)
+    base = _probe_media(ff, input_path)
+    if not base["has_video"] or base["width"] <= 0:
+        raise RuntimeError("The video could not be read.")
+    W, H = base["width"] - base["width"] % 2, base["height"] - base["height"] % 2
+    total = float(base["duration"] or 0.0)
+    items = []
+    for m in matches:
+        path = str(m["meme_path"])
+        if not Path(path).is_file():
+            continue
+        start = max(0.0, float(m["start"]))
+        end = min(float(m["end"]), total) if total else float(m["end"])
+        if end - start < 0.3:
+            continue
+        items.append({**m, "meme_path": path, "start": start, "end": end})
+    if not items:
+        shutil.copyfile(input_path, output_path)
+        return {"output_path": str(output_path), "memes_applied": 0, "size": (W, H), "duration": total}
+    cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-i", str(input_path)]
+    chains, v_last, audio_labels = [], "0:v", []
+    needs_sound = any(it.get("use_audio") for it in items)
+    if needs_sound and not base["has_audio"]:
+        cmd += ["-f", "lavfi", "-t", f"{total or max(i['end'] for i in items):.3f}", "-i", "anullsrc=r=44100:cl=stereo"]
+    first_meme = len(cmd)  # inputs added from here on are memes
+    n_extra = 1 if (needs_sound and not base["has_audio"]) else 0
+    for k, it in enumerate(items):
+        length = it["end"] - it["start"]
+        cmd += ["-ss", f"{float(it.get('trim_start', 0.0)):.3f}", "-t", f"{length:.3f}", "-i", it["meme_path"]]
+        idx = 1 + n_extra + k
+        fade_out = min(0.2, length / 3)
+        if it.get("mode") == "cutaway":
+            x = y = 0
+            geom = f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H}"
+            fade_in = 0.10
+        else:
+            rx, ry, rw, rh = [int(v) for v in it["rect"]]
+            rw, rh = max(16, rw - rw % 2), max(16, rh - rh % 2)
+            x, y = max(0, rx - border), max(0, ry - border)
+            geom = (f"scale={rw}:{rh},pad={rw + 2 * border}:{rh + 2 * border}:{border}:{border}:color=white")
+            fade_in = 0.15
+        chains.append(f"[{idx}:v]{geom},setsar=1,format=rgba,fade=t=in:st=0:d={fade_in}:alpha=1,"
+                      f"fade=t=out:st={max(0.0, length - fade_out):.3f}:d={fade_out:.3f}:alpha=1,"
+                      f"setpts=PTS-STARTPTS+{it['start']:.3f}/TB[mv{k}]")
+        out_label = f"v{k}"
+        chains.append(f"[{v_last}][mv{k}]overlay={x}:{y}:eof_action=pass:enable='between(t,{it['start']:.3f},{it['end']:.3f})'[{out_label}]")
+        v_last = out_label
+        if it.get("use_audio"):
+            ms = int(round(it["start"] * 1000))
+            chains.append(f"[{idx}:a]atrim=0:{length:.3f},asetpts=PTS-STARTPTS,aresample=44100,aformat=channel_layouts=stereo,"
+                          f"volume={float(it.get('volume', 0.7)):.3f},adelay={ms}|{ms}[ma{k}]")
+            audio_labels.append(f"[ma{k}]")
+    if audio_labels:
+        src = "[0:a]" if base["has_audio"] else "[1:a]"
+        chains.append(f"{src}aresample=44100,aformat=channel_layouts=stereo[ba]")
+        chains.append("[ba]" + "".join(audio_labels) + f"amix=inputs={1 + len(audio_labels)}:normalize=0:duration=first[aout]")
+    cmd += ["-filter_complex", ";".join(chains), "-map", f"[{v_last}]"]
+    cmd += ["-map", "[aout]"] if audio_labels else (["-map", "0:a?"] if base["has_audio"] else [])
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
+    cmd += ["-c:a", "aac", "-b:a", "160k"] if (audio_labels or base["has_audio"]) else ["-an"]
+    cmd += ["-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output_path)]
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, creationflags=flags)
+    try:
+        for line in proc.stdout:  # "out_time_us=123456" lines
+            if progress and total and line.startswith("out_time_us="):
+                try:
+                    progress(min(0.99, int(line.split("=", 1)[1]) / 1e6 / total))
+                except ValueError:
+                    pass
+        err = proc.stderr.read()
+        code = proc.wait(timeout=600)
+    except Exception:
+        proc.kill()
+        raise
+    finally:
+        for stream in (proc.stdout, proc.stderr):
+            if stream:
+                stream.close()
+    if code != 0 or not Path(output_path).is_file():
+        Path(output_path).unlink(missing_ok=True)
+        raise RuntimeError(f"ffmpeg could not add the reaction clips: {err[-500:]}")
+    if progress:
+        progress(1.0)
+    return {"output_path": str(Path(output_path).resolve()), "memes_applied": len(items), "size": (W, H), "duration": total}
+
+
 def place_podcast_avatar(
     base_video: str,
     avatar_video: str,

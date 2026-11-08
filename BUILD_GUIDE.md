@@ -34,8 +34,8 @@ Time: ~15 min of your clicking + 30-60 min of waiting. Needs only a web browser.
    the models, builds with PyInstaller, then **starts the finished exe and checks it answers**
    (the smoke test) before saving anything.
 6. **Download**: when the run is green, scroll to **Artifacts** at the bottom of the run page ->
-   click **CinePulseAI-ViMax-Portable**. GitHub wraps it once more, so you unzip twice:
-   download -> unzip -> inside is `CinePulseAI-ViMax-Portable.zip` -> unzip that -> folder `CinePulseAI`.
+   click **CinePulseAI-Ultimate-Meme-Portable**. GitHub wraps it once more, so you unzip twice:
+   download -> unzip -> inside is `CinePulseAI-Ultimate-Meme-Portable.zip` -> unzip that -> folder `CinePulseAI`.
 7. **Run**: open the `CinePulseAI` folder, double-click **CinePulseAI.exe**. Wait 10-40 seconds on
    first start; your browser opens the app. If Windows SmartScreen warns about an unknown publisher:
    *More info -> Run anyway* (it is your own program).
@@ -84,7 +84,7 @@ Needs a PC that can handle ~5 GB of downloads and a long build.
 3. Preview the build (changes nothing):  `python build_exe.py --dry-run`
 4. Build:  `python build_exe.py`
    It downloads `ffmpeg.exe`, the face model and the Whisper model automatically if missing, then writes
-   `dist\CinePulseAI\` and `dist\CinePulseAI-ViMax-Portable.zip`.
+   `dist\CinePulseAI\` and `dist\CinePulseAI-Ultimate-Meme-Portable.zip`.
    - Use `--no-token` to leave `token.json` out. `--no-download` stops all downloads (you must then
      supply `bin\ffmpeg.exe` yourself).
 5. Run `dist\CinePulseAI\CinePulseAI.exe` (or send the zip to any Windows laptop).
@@ -176,3 +176,11 @@ In the **AI Generator Lab**, the creation modes **Idea2Video**, **Novel2Video** 
 - **What the preview is.** A stylised animatic: a painted portrait per character (the same one in every shot), a backdrop seeded from the
   location, subtitles and keyframe continuity between shots. It is not photorealistic AI video; that needs a GPU.
 - The project (script, storyboard, characters, graph, subtitles) is saved next to the video in `outputs/story_*`.
+
+## Auto-Meme Reactions (CPU only, no API key)
+
+Switch on **Enable Contextual Meme Reactions** (Clip Repurposer, the classic narrated generator and the story modes). `backend/meme_matcher.py` reads the mood of each line (a local emotion lexicon; optionally Groq / Gemini structured-JSON tags in story mode), picks a clip from `storage/memes/` (next to the exe), and the video is composed with it as a corner tile or a full-screen cutaway. Overlays avoid the 3D avatar's corner. The finished file (with the reaction and avatar) is what gets uploaded to Google Drive.
+
+- Put clips in `storage/memes/<mood>/` (laugh, shock, sad, angry, cringe, confused, win, love, fear, cool), or name/tag them, or upload them in the app. "Create the starter pack" makes 10 simple original clips.
+- Matching uses the folder / file names and `memes.json` tags plus text sentiment. It does **not** watch the video, and the sentiment lexicon is weak on sarcasm.
+- Inspired by DaBlincx/meme-video-gen (usage archive so clips are not repeated) and ssrajadh/sentrysearch (cached index, confidence threshold). No code was copied.

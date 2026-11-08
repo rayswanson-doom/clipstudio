@@ -27,6 +27,7 @@ try:  # package import (backend.pipeline) or plain module (pipeline)
     from .avatar_sync import create_avatar_video, load_avatar
     from . import avatar_3d_engine
     from . import demo_avatars
+    from . import meme_matcher
     from . import ocr_engine
     from . import render_engine
     from . import transcriber as _transcriber_mod
@@ -36,11 +37,12 @@ try:  # package import (backend.pipeline) or plain module (pipeline)
     from .tts_engine import DEFAULT_VOICE, generate_voiceover
     from . import uploader as _uploader_mod
     from .uploader import DriveBackup, download_media, drive_status, upload_to_google_drive
-    from .video_engine import create_vertical_short, merge_audio_with_video, normalize_position_preset, place_podcast_avatar, PIP_PRESETS
+    from .video_engine import create_vertical_short, merge_audio_with_video, normalize_position_preset, place_podcast_avatar, splice_memes, PIP_PRESETS
 except ImportError:  # pragma: no cover
     from avatar_sync import create_avatar_video, load_avatar
     import avatar_3d_engine
     import demo_avatars
+    import meme_matcher
     import ocr_engine
     import render_engine
     import transcriber as _transcriber_mod
@@ -50,7 +52,7 @@ except ImportError:  # pragma: no cover
     from tts_engine import DEFAULT_VOICE, generate_voiceover
     import uploader as _uploader_mod
     from uploader import DriveBackup, download_media, drive_status, upload_to_google_drive
-    from video_engine import create_vertical_short, merge_audio_with_video, normalize_position_preset, place_podcast_avatar, PIP_PRESETS
+    from video_engine import create_vertical_short, merge_audio_with_video, normalize_position_preset, place_podcast_avatar, splice_memes, PIP_PRESETS
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +155,7 @@ def run_vugola_pipeline(
     ocr_backend: str = "auto",
     keep_download: bool = False,
     keep_models: bool = False,
+    memes: Optional[dict] = None,
 ) -> dict:
     """Find the best highlights in `source` and export each as a vertical short.
 
@@ -161,6 +164,8 @@ def run_vugola_pipeline(
                        have on-screen text, that text is used to pick the highlights.
     keep_download      keep the YouTube download in outputs/downloads (default: delete it, it is
                        only a working copy and can be huge)
+    memes              meme_matcher.MemeSettings dict: when enabled, each clip gets contextual reaction clips (matched to
+                       what is said / shown) BEFORE the Drive upload, so the uploaded file contains them
     keep_models        keep Whisper/OCR in RAM after the run (default: free them at once)
 
     Returns {"source_path", "word_count", "clips": [...], "transcript": [...], "screen_text": [...],
@@ -223,6 +228,18 @@ def run_vugola_pipeline(
                     )
                     clip["output_path"] = res["output_path"]
                     clip["faces_found"] = res["faces_found"]
+                    clip["memes"] = []
+                    if memes and memes.get("enabled"):
+                        segs = meme_matcher.segments_from_words(words, pick["start"], pick["end"])
+                        for sc in screen_segments:  # on-screen text (PaddleOCR / RapidOCR) can carry the emotion too
+                            if float(sc["start"]) < pick["end"] and float(sc["end"]) > pick["start"]:
+                                segs.append({"start": max(0.0, float(sc["start"]) - pick["start"]),
+                                             "end": min(pick["end"], float(sc["end"])) - pick["start"],
+                                             "text": str(sc["text"])})
+                        segs.sort(key=lambda x: x["start"])
+                        applied = _apply_memes(res["output_path"], segs, memes, [], ffmpeg_path, warnings, progress,
+                                               f"Adding meme reactions to clip {idx}")
+                        clip["memes"] = _meme_summary(applied)
                     if backup:
                         pending.append((clip, backup.submit(res["output_path"])))
                 except Exception as exc:  # keep going; report per clip
@@ -267,6 +284,63 @@ def _media_seconds(path: str) -> float:
         return (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) / fps
     finally:
         cap.release()
+
+
+def _frame_size(path: str) -> tuple:
+    import cv2
+
+    cap = cv2.VideoCapture(str(path))
+    try:
+        return int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    finally:
+        cap.release()
+
+
+def _apply_memes(video_path: str, segments: list, settings, avoid_rects, ffmpeg_path, warnings: list,
+                 progress=None, stage: str = "Adding meme reactions", llm=None, clamp: bool = False) -> list:
+    """Contextual meme reactions on a FINISHED video: plan from the text segments (emotion -> clip), splice the clips
+    in with ffmpeg and replace `video_path` in place, so whatever is uploaded next already contains them.
+    Never raises: a problem becomes a warning and the original video is kept. Returns the applied matches."""
+    if not settings:
+        return []
+    try:
+        cfg = settings if isinstance(settings, meme_matcher.MemeSettings) else meme_matcher.MemeSettings.from_dict(settings)
+        if not cfg.enabled:
+            return []
+        if not segments:
+            warnings.append("Meme reactions: there was no text to match, so none were added.")
+            return []
+        _emit(progress, stage, 0.0)
+        w, h = _frame_size(video_path)
+        dur = _media_seconds(video_path)
+        plan = meme_matcher.plan_for_video(segments, cfg, (w, h), dur, avoid_rects=avoid_rects or (), llm=llm,
+                                           clamp=clamp, ffmpeg_path=ffmpeg_path)
+        warnings.extend(x for x in plan.get("warnings", []) if x not in warnings)
+        if not plan["matches"]:
+            if not plan["library"]["clips"]:
+                warnings.append(f"Meme reactions are on but the meme folder is empty ({plan['library']['folder']}). "
+                                "Add reaction clips (or create the starter pack) on the Generator tab.")
+            else:
+                warnings.append("Meme reactions: no moment was emotional enough for a reaction.")
+            return []
+        tmp = str(video_path) + ".memes.mp4"
+        try:
+            res = splice_memes(video_path, tmp, plan["matches"], ffmpeg_path=ffmpeg_path,
+                               progress=lambda f: _emit(progress, stage, f))
+            if res["memes_applied"] <= 0:
+                return []
+            os.replace(tmp, video_path)
+        finally:
+            _remove(tmp)
+        return plan["matches"][: res["memes_applied"]] if res["memes_applied"] < len(plan["matches"]) else plan["matches"]
+    except Exception as exc:  # the un-reacted video is still good
+        logger.warning("meme reactions failed: %s", exc)
+        warnings.append(f"Could not add the meme reactions ({exc}); the video has none.")
+        return []
+
+
+def _meme_summary(matches: list) -> list:
+    return [{k: m.get(k) for k in ("start", "end", "emotion", "meme_name", "mode", "position", "text", "score")} for m in matches]
 
 
 def _podcast_commentary(avatar_image, avatar_type, script, audio_path, out_name, out_dir, background_video, position, xy,
@@ -366,6 +440,7 @@ def run_viewmax_pipeline(
     show_screen_text: bool = True,
     music_path: Optional[str] = None,
     broll_style: str = "aurora",
+    memes: Optional[dict] = None,
 ) -> dict:
     """Prompt / your own script -> voiceover -> video (+ avatar, + visual action cues) -> Drive.
 
@@ -488,6 +563,14 @@ def run_viewmax_pipeline(
             finally:
                 _remove(tmp_out)
 
+        meme_applied: list = []
+        if memes and memes.get("enabled"):
+            dur = _media_seconds(video_path)
+            segs = meme_matcher.segments_from_text(script["script"], dur)
+            rects = [avatar_info["layout"]["rect"]] if avatar_info and avatar_info.get("layout") else []
+            meme_applied = _apply_memes(video_path, segs, memes, rects, ffmpeg_path, warnings, progress,
+                                        "Adding meme reactions")
+
         drive_link = None
         if folder_id:
             _emit(progress, "Backing up to Google Drive", 0.88)
@@ -502,7 +585,7 @@ def run_viewmax_pipeline(
         return {
             "script": script, "audio_path": audio_path, "video_path": video_path,
             "drive_link": drive_link, "avatar": avatar_info, "cues_applied": cues_applied,
-            "screen_text": screen_lines, "screen_queue": screen_queue, "warnings": warnings,
+            "memes": _meme_summary(meme_applied), "screen_text": screen_lines, "screen_queue": screen_queue, "warnings": warnings,
         }
     finally:
         release_memory(not keep_models)
@@ -534,6 +617,7 @@ def run_story_pipeline(
     drift_threshold: float = 0.35,
     host_avatar: Optional[dict] = None,
     transport=None,
+    memes: Optional[dict] = None,
 ) -> dict:
     """Idea / screenplay / novel -> multi-shot storyboard (+ CPU animatic) -> Google Drive, on any computer (no GPU).
 
@@ -611,6 +695,22 @@ def run_story_pipeline(
             except Exception as exc:  # the plan is still valuable when rendering fails
                 logger.warning("story render failed: %s", exc)
                 ep_warn.append(f"The video could not be rendered ({exc}). The storyboard files were still saved.")
+        meme_applied: list = []
+        if video_path and memes and memes.get("enabled"):
+            shots = result["storyboard"]["shots"]
+            rects = []
+            if host_avatar and host_avatar.get("image"):  # keep reactions off the narrator's corner
+                w, h = _frame_size(video_path)
+                sc = float(host_avatar.get("scale") or 0.3)
+                bw = int(w * sc)
+                pos = host_avatar.get("position") or "Bottom-Right"
+                xy = host_avatar.get("xy") or (0, 0)
+                x = {"Bottom-Right": w - bw - 12, "Top-Right": w - bw - 12}.get(pos, 12) if pos != "Custom Coordinates" else int(xy[0])
+                y = {"Top-Right": 12, "Top-Left": 12}.get(pos, h - bw - 12) if pos != "Custom Coordinates" else int(xy[1])
+                rects = [(x, y, bw, bw)]
+            meme_applied = _apply_memes(video_path, meme_matcher.segments_from_shots(shots), memes, rects, ffmpeg_path,
+                                        ep_warn, lambda st, f: prog(st, 0.88 + 0.03 * f), "Adding meme reactions",
+                                        llm=llm, clamp=True)
         drive_link = project_link = None
         if video_path:  # every finished render is backed up, together with its project files
             if not folder_checked:
@@ -630,10 +730,11 @@ def run_story_pipeline(
                 if drive_link:
                     drive_links.append(drive_link)
         result.update({"project_dir": str(project_dir), "video_path": video_path, "drift": drift,
-                       "drive_link": drive_link, "project_link": project_link, "rendered": bool(video_path)})
+                       "drive_link": drive_link, "project_link": project_link, "rendered": bool(video_path),
+                       "memes": _meme_summary(meme_applied)})
         summaries.append({"episode": e, "title": result["plan"].get("title"), "video_path": video_path,
                           "project_dir": str(project_dir), "drive_link": drive_link, "project_link": project_link,
-                          "shots": len(result["storyboard"]["shots"]), "seconds": result["storyboard"]["total_duration"],
+                          "memes": _meme_summary(meme_applied), "shots": len(result["storyboard"]["shots"]), "seconds": result["storyboard"]["total_duration"],
                           "drift": drift, "warnings": ep_warn})
         warnings.extend(f"{label}{w}" for w in ep_warn if f"{label}{w}" not in warnings)
         if first is None:

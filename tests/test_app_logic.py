@@ -556,3 +556,75 @@ class ViewmaxTabTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MemePanelTests(unittest.TestCase):
+    def setUp(self):
+        import os
+        self.tmp = tempfile.mkdtemp()
+        self._old = os.environ.get("CINEPULSE_MEMES")
+        os.environ["CINEPULSE_MEMES"] = self.tmp
+
+    def tearDown(self):
+        import os
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        if self._old is None:
+            os.environ.pop("CINEPULSE_MEMES", None)
+        else:
+            os.environ["CINEPULSE_MEMES"] = self._old
+
+    def test_toggle_is_present_in_every_generating_mode_and_off_by_default(self):
+        for inputs, prefix in (({"lab_mode": "Clip Repurposer"}, "vugola"), ({"idea_flavor": "Narrated video with a 3D avatar (classic)"}, "viewmax"),
+                               ({}, "story"), ({"lab_mode": "Script2Video"}, "story"), ({"lab_mode": "Novel2Video"}, "story")):
+            f = run_app(FakeSt(inputs))
+            boxes = [c for c in f.names("checkbox") if c[2]["key"] == f"{prefix}_meme_on"]
+            self.assertEqual(len(boxes), 1, inputs)
+            self.assertEqual(boxes[0][1][0], "Enable Contextual Meme Reactions")
+            ups = [c for c in f.names("file_uploader") if c[2]["key"] == f"{prefix}_meme_up"]
+            self.assertEqual(len(ups), 1)
+
+    def test_clip_run_forwards_meme_settings(self):
+        with mock.patch.object(pipeline, "run_vugola_pipeline", return_value=VUGOLA) as rv:
+            run_app(ClipFake({"vugola_url": "https://youtu.be/x", "vugola_meme_on": True, "vugola_meme_mode": "Corner tile only",
+                              "vugola_meme_rate": 6, "vugola_meme_pos": "Custom Coordinates", "vugola_meme_x": 11,
+                              "vugola_meme_y": 22}, clicked=["vugola_run"]))
+        cfg = rv.call_args.kwargs["memes"]
+        self.assertTrue(cfg["enabled"])
+        self.assertEqual(cfg["mode"], "overlay")
+        self.assertEqual(cfg["max_per_minute"], 6.0)
+        self.assertEqual(cfg["position"], "Custom Coordinates")
+        self.assertEqual(cfg["xy"], (11, 22))
+
+    def test_off_sends_none_and_classic_forwards_when_on(self):
+        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
+            run_app(ClassicFake({"viewmax_prompt": "hi"}, clicked=["viewmax_run"]))
+        self.assertIsNone(rv.call_args.kwargs["memes"])
+        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
+            run_app(ClassicFake({"viewmax_prompt": "hi", "viewmax_meme_on": True}, clicked=["viewmax_run"]))
+        cfg = rv.call_args.kwargs["memes"]
+        self.assertTrue(cfg["enabled"])
+        self.assertNotIn("position", cfg)  # auto: avoid the avatar
+
+    def test_upload_goes_into_the_meme_folder(self):
+        import shutil
+        import cv2
+        import numpy as np
+        ff = shutil.which("ffmpeg")
+        if not ff:
+            self.skipTest("ffmpeg needed")
+        src = Path(self.tmp) / "src.mp4"
+        vw = cv2.VideoWriter(str(src), cv2.VideoWriter_fourcc(*"mp4v"), 10, (64, 64))
+        for _ in range(15):
+            vw.write(np.zeros((64, 64, 3), np.uint8))
+        vw.release()
+
+        class Up:
+            name = "lol.mp4"
+
+            def getvalue(self):
+                return src.read_bytes()
+        f = ClipFake({"vugola_meme_up": [Up()], "vugola_meme_emo": "laugh"}, clicked=["vugola_meme_add"])
+        run_app(f)
+        self.assertTrue(list(Path(self.tmp, "laugh").glob("lol*.mp4")), f.names("error"))
+

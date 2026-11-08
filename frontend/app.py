@@ -414,6 +414,89 @@ def render_clip_card(i: int, clip: dict) -> None:
                 st.error(clip["error"])
 
 
+MEME_MODES = {"Auto (cut away on big reactions, otherwise a corner tile)": "auto", "Corner tile only": "overlay",
+              "Full-screen cutaway only": "cutaway"}
+MEME_POSITIONS = ["Auto (avoid the avatar)"] + list(pipeline.PIP_PRESETS)
+
+
+def render_meme_panel(prefix: str) -> dict | None:
+    """'Enable Contextual Meme Reactions' + the reaction-clip library (upload / list / delete / starter pack).
+    Returns the settings dict for the pipelines, or None when switched off. All matching runs locally."""
+    mm = pipeline.meme_matcher
+    with st.expander("😂 Contextual meme reactions", expanded=False):
+        on = st.checkbox("Enable Contextual Meme Reactions", value=False, key=f"{prefix}_meme_on",
+                         help="Matches the mood of each line (laugh, shock, sad, ...) to a clip in your meme folder and "
+                              "splices it in as a corner tile or a quick cutaway. Runs on the CPU, no API key.")
+        lib = mm.MemeLibrary(mm.default_meme_dir())
+        info = lib.summary()
+        st.caption(f"Meme folder: {info['folder']} - {info['clips']} clip(s). Matching uses folder names "
+                   "(laugh/, shock/, ...), file names and tags, not the picture itself.")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            mode_label = st.selectbox("Style", list(MEME_MODES), key=f"{prefix}_meme_mode", disabled=not on)
+        with c2:
+            per_min = st.slider("Max reactions per minute", 1, 12, 4, key=f"{prefix}_meme_rate", disabled=not on)
+        with c3:
+            sens = st.slider("Sensitivity (%)", 0, 100, 50, key=f"{prefix}_meme_sens", disabled=not on,
+                             help="Higher reacts to milder moments.")
+        d1, d2 = st.columns(2)
+        with d1:
+            pos_label = st.selectbox("Tile corner", MEME_POSITIONS, key=f"{prefix}_meme_pos", disabled=not on)
+        with d2:
+            use_audio = st.checkbox("Play the meme's own sound", value=True, key=f"{prefix}_meme_audio", disabled=not on)
+        xy = None
+        if on and pos_label == "Custom Coordinates":
+            e1, e2 = st.columns(2)
+            with e1:
+                mx = st.number_input("Tile X (pixels)", 0, 3000, 40, key=f"{prefix}_meme_x")
+            with e2:
+                my = st.number_input("Tile Y (pixels)", 0, 3000, 200, key=f"{prefix}_meme_y")
+            xy = (int(mx), int(my))
+
+        st.markdown("**Reaction clip library**")
+        emo_label = st.selectbox("File the upload under", ["(let the file name decide)"] + list(mm.EMOTIONS),
+                                 key=f"{prefix}_meme_emo")
+        ups = st.file_uploader("Add your own reaction videos", type=[e.lstrip(".") for e in mm.VIDEO_EXTENSIONS],
+                               accept_multiple_files=True, key=f"{prefix}_meme_up")
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("Add to library", key=f"{prefix}_meme_add", disabled=not ups):
+                for f in ups:
+                    try:
+                        lib.add_file(f.name, f.getvalue(), None if emo_label.startswith("(") else emo_label)
+                        st.success(f"Added {f.name}")
+                    except Exception as exc:
+                        st.error(str(exc))
+        with b2:
+            if st.button("Create the starter pack", key=f"{prefix}_meme_starter",
+                         help="10 simple original animated reactions, one per mood."):
+                try:
+                    mm.ensure_starter_pack(str(lib.dir))
+                    st.success("Starter pack created.")
+                except Exception as exc:
+                    st.error(f"Could not create the starter pack: {exc}")
+        if info["per_emotion"]:
+            st.markdown('<div class="cp-chips">' + "".join(
+                f'<span class="cp-chip">{_e(k)}: {v}</span>' for k, v in info["per_emotion"].items()) + "</div>",
+                unsafe_allow_html=True)
+        for bad in info["failed"][:5]:
+            st.warning(f"Skipped {bad.get('path')}: {bad.get('reason')}")
+        names = [c["rel"] for c in lib.clips] if lib.clips and "rel" in lib.clips[0] else [c["name"] for c in lib.clips]
+        if names:
+            gone = st.selectbox("Remove a clip", ["-"] + names, key=f"{prefix}_meme_del")
+            if gone != "-" and st.button("Delete this clip", key=f"{prefix}_meme_delbtn"):
+                st.success("Deleted." if lib.remove(gone) else "That clip could not be deleted.")
+    if not on:
+        return None
+    cfg = {"enabled": True, "mode": MEME_MODES[mode_label], "max_per_minute": float(per_min),
+           "sensitivity": sens / 100.0, "use_audio": bool(use_audio)}
+    if not pos_label.startswith("Auto"):
+        cfg["position"] = pos_label
+        if xy:
+            cfg["xy"] = xy
+    return cfg
+
+
 def render_clip_tab(folder_id: str) -> None:
     section_header("Clip Repurposer Studio",
                    "Turn a long video into short vertical clips that follow the speaker's face.")
@@ -443,6 +526,8 @@ def render_clip_tab(folder_id: str) -> None:
         clip_ocr_label = st.selectbox("Text reader (OCR)", list(OCR_CHOICES), key="vugola_ocr_backend", disabled=not ocr_on,
                                       help="Which engine reads the text burned into the video frames.")
 
+    meme_cfg = render_meme_panel("vugola")
+
     if st.button("Generate viral clips", type="primary", key="vugola_run"):
         if not url.strip() and uploaded is None:
             st.warning("Paste a YouTube URL or upload a video first.")
@@ -459,7 +544,7 @@ def render_clip_tab(folder_id: str) -> None:
                 st.session_state["vugola_result"] = pipeline.run_vugola_pipeline(
                     source, folder_id, top_n=top_n, min_len=min_len, max_len=max_len,
                     output_dir=str(OUTPUT_DIR), progress=callback, allow_center_fallback=fallback,
-                    read_screen_text=ocr_on,
+                    read_screen_text=ocr_on, memes=meme_cfg,
                     **({"ocr_backend": OCR_CHOICES[clip_ocr_label]} if ocr_on and OCR_CHOICES[clip_ocr_label] != "auto" else {}),
                 )
             except Exception as exc:
@@ -601,6 +686,8 @@ def render_narrated_generator(folder_id: str) -> None:
         st.caption("3D models get phoneme-level lip sync, blinking, breathing, head nods and arm gestures; the "
                    "video is 1080 x 1920 and the avatar sits in a rounded podcast frame.")
 
+    meme_cfg = render_meme_panel("viewmax")
+
     if st.button("Generate video", type="primary", key="viewmax_run"):
         if not prompt.strip() and not custom_script.strip():
             st.warning("Enter a prompt or paste your own script first.")
@@ -641,7 +728,7 @@ def render_narrated_generator(folder_id: str) -> None:
                     extra["broll_style"] = BACKDROPS[backdrop_label]
                 st.session_state["viewmax_result"] = pipeline.run_viewmax_pipeline(
                     prompt, folder_id, background_video=bg_path, voice=voice,
-                    output_dir=str(OUTPUT_DIR), progress=callback, **extra,
+                    output_dir=str(OUTPUT_DIR), progress=callback, memes=meme_cfg, **extra,
                 )
             except Exception as exc:
                 st.session_state.pop("viewmax_result", None)
@@ -763,6 +850,8 @@ def render_story_panel(folder_id: str, mode: str) -> None:
         st.caption("The host is a framed still portrait. The lip-synced 3D avatar is in Idea2Video > "
                    "'Narrated video with a 3D avatar (classic)'. Story characters keep clear of the host's corner.")
 
+    meme_cfg = render_meme_panel("story")
+
     if st.button("Create the video" if render_on else "Plan the story", type="primary", key="story_run"):
         temp = []
         try:
@@ -792,7 +881,7 @@ def render_story_panel(folder_id: str, mode: str) -> None:
                     all_episodes=bool(all_eps), render=bool(render_on), voice=bool(voice_on and render_on),
                     camera={"size": CAMERA_SIZES[size_label], "angle": CAMERA_ANGLES[angle_label], "movement": CAMERA_MOVES[move_label]},
                     use_portraits=bool(portraits_on), continuity=bool(continuity_on), drift_threshold=tolerance / 100.0,
-                    host_avatar=host)
+                    host_avatar=host, memes=meme_cfg if render_on else None)
         except Exception as exc:
             st.session_state.pop("story_result", None)
             st.error(f"Something went wrong: {exc}")

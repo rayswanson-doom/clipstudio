@@ -47,7 +47,7 @@ APP_NAME = "CinePulseAI"
 BACKEND_MODULES = ["pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine", "avatar_sync",
                    "ocr_engine", "visual_cues", "avatar_3d_engine", "glb_model", "soft_raster", "lipsync_en",
                    "avatar_gestures", "demo_avatars", "render_engine",
-                   "vimax_orchestrator", "novel_adapter", "script_parser", "dependency_graph"]
+                   "vimax_orchestrator", "novel_adapter", "script_parser", "dependency_graph", "meme_matcher"]
 REQUIRED_SOURCES = [
     "launcher.py", "selftest.py", "frontend/app.py",
     *[f"backend/{m}.py" for m in BACKEND_MODULES],
@@ -78,6 +78,7 @@ HIDDEN_IMPORTS = [
     "google.auth.transport.requests", "google.oauth2.credentials",
     "googleapiclient.discovery", "googleapiclient.http",
     "google_auth_oauthlib.flow", "mediapipe.tasks.python.vision",
+    "cv2", "mediapipe", "numpy",  # OpenCV + MediaPipe (meme tiles, face tracking)
     "rapidocr_onnxruntime", "onnxruntime",  # imported lazily, so PyInstaller cannot see them
 ]
 COPY_METADATA = ["streamlit"]  # streamlit reads its own version via importlib.metadata

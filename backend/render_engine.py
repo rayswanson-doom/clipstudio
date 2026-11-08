@@ -51,7 +51,7 @@ DEFAULT_SIZE = (1080, 1920)
 DEFAULT_FPS = 30
 ANIMATIONS = ("none", "fade", "slide_up", "slide_down", "slide_left", "slide_right", "pop", "zoom")
 BROLL_STYLES = ("aurora", "sunset", "mono", "day", "night", "interior")
-Z_ORDER = {"broll": 0, "text": 10, "avatar": 20}
+Z_ORDER = {"broll": 0, "cutaway": 5, "text": 10, "avatar": 20, "meme": 30}
 
 
 # --------------------------------------------------------------------------- #
@@ -269,7 +269,7 @@ def ltx_video_status() -> dict:
 # --------------------------------------------------------------------------- #
 @dataclass
 class Item:
-    kind: str  # "broll" | "audio" | "text" | "avatar"
+    kind: str  # "broll" | "audio" | "text" | "avatar" | "meme"
     start: float
     end: Optional[float]
     name: str = ""
@@ -528,7 +528,8 @@ class Composition:
 
     # ---- tracks --------------------------------------------------------- #
     def add_audio(self, path: str, start: float = 0.0, end: Optional[float] = None, volume: float = 1.0,
-                  role: str = "voiceover", fade_in: float = 0.0, fade_out: float = 0.0, loop: bool = False) -> Item:
+                  role: str = "voiceover", fade_in: float = 0.0, fade_out: float = 0.0, loop: bool = False,
+                  trim_start: float = 0.0) -> Item:
         """role "voiceover" (defines the video length when none is set) or "music" (ducked under the voice)."""
         if role not in ("voiceover", "music", "sfx"):
             raise ValueError("role must be 'voiceover', 'music' or 'sfx'")
@@ -536,10 +537,11 @@ class Composition:
             raise FileNotFoundError(f"Audio file not found: {path}")
         length = _video_seconds(self.ffmpeg, str(path))
         if end is None and not loop and length > 0:
-            end = start + length
+            end = start + max(0.05, length - max(0.0, trim_start))
         return self._add(Item("audio", start, end, Path(path).name,
                               {"path": str(path), "volume": volume, "role": role, "fade_in": fade_in,
-                               "fade_out": fade_out, "loop": loop, "source_seconds": length}))
+                               "fade_out": fade_out, "loop": loop, "source_seconds": length,
+                               "trim_start": max(0.0, float(trim_start))}))
 
     def add_broll(self, source: Optional[str] = None, start: float = 0.0, end: Optional[float] = None,
                   motion: str = "ken_burns", style: str = "aurora", fade: float = 0.0, loop: bool = True,
@@ -627,6 +629,61 @@ class Composition:
                               {"video": str(video), "is_image": is_image, "preset": preset, "rect": rect, "animation": animation,
                                "border_color": border_color, "shadow": shadow, "source_seconds": info["duration"]}))
 
+    def add_meme(self, video: str, start: float, end: Optional[float] = None, mode: str = "overlay",
+                 position: str = "Top-Right", xy: Optional[Tuple[float, float]] = None, scale: float = 0.34,
+                 rect: Optional[Tuple[int, int, int, int]] = None, trim_start: float = 0.0, use_audio: bool = True,
+                 volume: float = 0.7, animation: str = "pop", border_color=(255, 255, 255)) -> Item:
+        """A reaction clip spliced into the timeline.
+
+        mode "overlay"  a secondary frame (rounded, bordered, shadowed like the avatar's) in a corner / at X,Y, or at `rect`
+        mode "cutaway"  the reaction takes the whole screen for its length, with a quick flash-zoom in and a fade out
+                        (the captions and the avatar stay on top), i.e. a transition frame between two beats
+        The clip's own sound is mixed in as a sound effect when `use_audio` is on and the clip has audio."""
+        if mode not in ("overlay", "cutaway"):
+            raise ValueError("meme mode must be 'overlay' or 'cutaway'")
+        if animation not in ANIMATIONS:
+            raise ValueError(f"Unknown animation '{animation}'. Use one of: {', '.join(ANIMATIONS)}.")
+        if not Path(video).is_file():
+            raise FileNotFoundError(f"Meme clip not found: {video}")
+        info = _ve._probe_media(self.ffmpeg, video)
+        if not info["has_video"] or info["width"] <= 0:
+            raise RuntimeError(f"The meme clip could not be read: {video}")
+        W, H = self.size
+        if mode == "cutaway":
+            rect, preset = (0, 0, W, H), "Full screen"
+        else:
+            preset = _ve.normalize_position_preset(position)
+            if rect is None:
+                if preset == "Custom Coordinates" and xy is None:
+                    raise ValueError("Custom Coordinates needs an (X, Y) position in pixels.")
+                rect = _ve.compute_pip_rect(self.size, (info["width"], info["height"]), preset, xy, scale)
+            rect = tuple(int(v) for v in rect)
+        avail = max(0.0, info["duration"] - max(0.0, trim_start)) if info["duration"] > 0 else 0.0
+        if end is None:
+            end = start + (avail or 2.0)
+        elif avail > 0 and end - start > avail + 0.05:
+            end = start + avail  # never ask for more picture than the clip has
+        item = self._add(Item("meme", start, end, Path(video).name,
+                              {"video": str(video), "is_image": False, "mode": mode, "preset": preset, "rect": rect,
+                               "animation": animation, "border_color": border_color, "shadow": True, "trim_start": max(0.0, float(trim_start)),
+                               "out_dur": 0.25, "source_seconds": info["duration"], "has_audio": bool(info["has_audio"])}))
+        if use_audio and info["has_audio"] and volume > 0:
+            self.add_audio(video, start, end, volume=volume, role="sfx", fade_out=min(0.2, (end - start) / 3),
+                           trim_start=trim_start)
+        return item
+
+    def add_memes(self, matches: Sequence[dict]) -> List[Item]:
+        """Add the placements planned by meme_matcher.plan_memes()."""
+        out = []
+        for m in matches:
+            try:
+                out.append(self.add_meme(m["meme_path"], m["start"], m["end"], m.get("mode", "overlay"), m.get("position") or "Top-Right",
+                                         m.get("xy"), m.get("scale", 0.34), tuple(m["rect"]) if m.get("rect") and m.get("mode") != "cutaway" else None,
+                                         m.get("trim_start", 0.0), m.get("use_audio", True), m.get("volume", 0.7)))
+            except (OSError, RuntimeError, ValueError) as exc:  # one bad clip must not cost the whole video
+                self.warnings.append(f"The meme '{m.get('meme_name', m.get('meme_path'))}' was skipped: {exc}")
+        return out
+
     # ---- checks --------------------------------------------------------- #
     def validate(self) -> List[str]:
         """Human-readable problems with the timeline (empty list = fine)."""
@@ -649,6 +706,11 @@ class Composition:
             problems.append("There is no B-roll track; a plain background is used.")
         if sum(1 for i in self.items if i.kind == "avatar") > 1:
             problems.append("More than one avatar track: they are drawn on top of each other.")
+        av_rects = [i.data["rect"] for i in self.items if i.kind == "avatar"]
+        for m in (i for i in self.items if i.kind == "meme" and i.data["mode"] == "overlay"):
+            mx, my, mw, mh = m.data["rect"]
+            if any(mx < x + w and x < mx + mw and my < y + h and y < my + mh for x, y, w, h in av_rects):
+                problems.append(f"Meme '{m.name}' covers the avatar at {m.start:.1f}s; pick another corner for the meme.")
         return problems
 
     def timeline_rows(self) -> List[dict]:
@@ -672,7 +734,8 @@ class Composition:
             parts = [f"[{k}:a]aresample=44100,aformat=channel_layouts=stereo"]
             if d["loop"]:
                 parts.append("aloop=loop=-1:size=2000000000")
-            parts.append(f"atrim=0:{max(0.01, end - a.start):.3f},asetpts=PTS-STARTPTS")
+            ts = d.get("trim_start", 0.0)
+            parts.append(f"atrim={ts:.3f}:{ts + max(0.01, end - a.start):.3f},asetpts=PTS-STARTPTS")
             if d["volume"] != 1.0:
                 parts.append(f"volume={d['volume']:.3f}")
             if d["fade_in"] > 0:
@@ -753,7 +816,9 @@ class Composition:
                 "size": self.size, "tracks": self.timeline_rows(), "warnings": warnings,
                 "avatar": None if av is None else {"preset": av.data["preset"], "rect": av.data["rect"]},
                 "avatars": [{"name": i.name, "preset": i.data["preset"], "rect": i.data["rect"]}
-                            for i in self.items if i.kind == "avatar"]}
+                            for i in self.items if i.kind == "avatar"],
+                "memes": [{"name": i.name, "mode": i.data["mode"], "start": round(i.start, 2), "end": round(self._resolved_end(i), 2),
+                           "rect": i.data["rect"], "preset": i.data["preset"]} for i in self.items if i.kind == "meme"]}
 
 
 class _FrameRenderer:
@@ -766,6 +831,8 @@ class _FrameRenderer:
         self.broll = sorted((i for i in comp.items if i.kind == "broll"), key=lambda i: i.start)
         self.texts = sorted((i for i in comp.items if i.kind == "text"), key=lambda i: i.start)
         self.avatars = [i for i in comp.items if i.kind == "avatar"]
+        self.cutaways = sorted((i for i in comp.items if i.kind == "meme" and i.data["mode"] == "cutaway"), key=lambda i: i.start)
+        self.memes = sorted((i for i in comp.items if i.kind == "meme" and i.data["mode"] == "overlay"), key=lambda i: i.start)
         self._src: Dict[int, object] = {}
         self._text_layers: Dict[int, np.ndarray] = {}
         self._sprite: Dict[int, tuple] = {}
@@ -894,7 +961,7 @@ class _FrameRenderer:
 
         c_pm, a1, m, (x0, y0, x1, y1) = self._avatar_sprite(item)
         x, y, w, h = item.data["rect"]
-        frame = self._src[id(item)].frame_at(t - item.start)
+        frame = self._src[id(item)].frame_at(t - item.start + item.data.get("trim_start", 0.0))
         if frame is None:
             return
         tile = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA).astype(np.float32)
@@ -903,7 +970,7 @@ class _FrameRenderer:
         pm = full_tile * m + c_pm * (1.0 - m)
         al = m + a1 * (1.0 - m)
         length = self.c._resolved_end(item) - item.start
-        alpha, dx, dy, scale = overlay_state(item.data["animation"], t - item.start, length, out_dur=0.0)
+        alpha, dx, dy, scale = overlay_state(item.data["animation"], t - item.start, length, out_dur=item.data.get("out_dur", 0.0))
         if alpha <= 0.003:
             return
         pm, al = _scale_sprite(pm, al, scale)
@@ -912,16 +979,49 @@ class _FrameRenderer:
         py = y0 + int(((y1 - y0) - sh) / 2 + dy * (y1 - y0))
         _blend(canvas, pm, al, px, py, alpha)
 
+    # -- full-screen reaction cutaway ------------------------------------ #
+    def _draw_cutaway(self, canvas: np.ndarray, item: Item, t: float) -> np.ndarray:
+        import cv2
+
+        key = id(item)
+        if key not in self._src:
+            self._src[key] = _VideoReader(item.data["video"])
+        frame = self._src[key].frame_at(t - item.start + item.data.get("trim_start", 0.0))
+        if frame is None:
+            return canvas
+        h, w = frame.shape[:2]
+        k = max(self.W / w, self.H / h)  # cover the screen, crop the overflow
+        zoom_in = 1.0 + 0.10 * (1.0 - ease("power3.out", _clamp01((t - item.start) / 0.22)))  # a quick zoom "punch"
+        nw, nh = int(round(w * k * zoom_in)), int(round(h * k * zoom_in))
+        big = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
+        x0, y0 = (nw - self.W) // 2, (nh - self.H) // 2
+        full = big[y0:y0 + self.H, x0:x0 + self.W]
+        length = self.c._resolved_end(item) - item.start
+        a_in = ease("power2.out", _clamp01((t - item.start) / 0.12))
+        a_out = 1.0 - ease("power2.in", _clamp01((t - (item.start + length - 0.20)) / 0.20))
+        alpha = min(a_in, a_out)
+        flash = max(0.0, 1.0 - (t - item.start) / 0.10) * 0.55  # white flash on the cut
+        out = canvas.astype(np.float32) * (1 - alpha) + full.astype(np.float32) * alpha
+        if flash > 0:
+            out = out * (1 - flash) + 255.0 * flash
+        return np.clip(out, 0, 255).astype(np.uint8)
+
     # -- frame ----------------------------------------------------------- #
     def frame(self, i: int) -> np.ndarray:
         t = i / self.c.fps
         canvas = self._background(t)
+        for it in self.cutaways:
+            if it.start - 1e-6 <= t < self.c._resolved_end(it):
+                canvas = self._draw_cutaway(canvas, it, t)
         for it in self.texts:
             if it.start - 1e-6 <= t < self.c._resolved_end(it):
                 self._draw_text(canvas, it, t)
         for it in self.avatars:
             if it.start - 1e-6 <= t < self.c._resolved_end(it) or t >= it.start:
                 self._draw_avatar(canvas, it, t)
+        for it in self.memes:
+            if it.start - 1e-6 <= t < self.c._resolved_end(it):
+                self._draw_avatar(canvas, it, t)  # same framed-tile drawing, with its own timing and fade-out
         return canvas
 
     def close(self) -> None:
@@ -951,9 +1051,13 @@ def render_commentary(
     fps: int = DEFAULT_FPS,
     ffmpeg_path: Optional[str] = None,
     progress: Optional[ProgressCb] = None,
+    memes: Optional[Sequence[dict]] = None,
+    meme_plan: Optional[Callable[[Tuple[int, int], float, List[tuple]], Sequence[dict]]] = None,
 ) -> dict:
     """voiceover + B-roll (or the animated backdrop) + OCR text overlays + avatar in a corner -> one video.
-    Every track is aligned to the voiceover, which sets the length."""
+    Every track is aligned to the voiceover, which sets the length.
+    Reaction memes: pass ready placements as `memes`, or a `meme_plan(frame_size, duration, avatar_rects)` callable
+    that plans them once the voiceover length and the avatar's rectangle are known (the memes then avoid the avatar)."""
     comp = Composition(size, fps, ffmpeg_path=ffmpeg_path)
     comp.add_audio(voiceover_path, role="voiceover")
     if music_path:
@@ -968,4 +1072,9 @@ def render_commentary(
         comp.add_avatar(avatar_video, 0.0, comp.duration, position, xy, scale)
     if screen_segments and show_screen_text:
         comp.add_ocr_overlays(screen_segments, source_duration=bg_len, loop=True, position="auto")
+    placements = list(memes or [])
+    if meme_plan is not None:
+        placements = list(meme_plan(comp.size, comp.duration, [i.data["rect"] for i in comp.items if i.kind == "avatar"]) or [])
+    if placements:
+        comp.add_memes(placements)
     return comp.render(output_path, progress)
