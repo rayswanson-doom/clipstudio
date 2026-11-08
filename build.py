@@ -67,7 +67,7 @@ EXTRA_COLLECT_ALL = [
 PADDLE_COLLECT_ALL = ["paddleocr", "paddle", "paddlex"]
 # PyTorch is NOT used by the 3-D avatar renderer (numpy + OpenCV) or by anything else in the app, and it adds
 # ~1-2 GB, so it is opt-in: build_exe.py --with-torch (for people who add torch-based avatar models later).
-TORCH_COLLECT_ALL = ["torch", "torchvision"]
+TORCH_COLLECT_ALL = ["torch", "torchvision", "sentence_transformers"]  # the last one: MiniLM for Novel2Video
 PIP_NAMES = {  # import name -> pip package name, where they differ
     "cv2": "opencv-python",
     "googleapiclient": "google-api-python-client",

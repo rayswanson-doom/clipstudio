@@ -201,7 +201,7 @@ def check_story() -> str:
         raise RuntimeError(f"storyboard check failed: {errors or 'too few shots'}")
     with tempfile.TemporaryDirectory() as d:
         out = os.path.join(d, "s.mp4")
-        res = vo.render_storyboard(r, out, work_dir=os.path.join(d, "w"), size=(180, 320), fps=8, max_shots=3)
+        res = vo.render_storyboard(r, out, work_dir=os.path.join(d, "w"), size=(270, 480), fps=8, max_shots=3)
         if os.path.getsize(out) < 1000 or not res["drift"]:
             raise RuntimeError(f"animatic is empty: {res}")
         bad = [x for x in res["drift"] if x["status"] != "ok"]
@@ -266,10 +266,24 @@ def check_app_page(app_path: Optional[Path]) -> str:
     at = AppTest.from_file(str(app_path), default_timeout=90).run()
     if at.exception:
         raise RuntimeError("; ".join(str(e.value) for e in at.exception))
-    tabs = [t.label for t in at.tabs]
-    if tabs[:2] != ["🎬 Clip Repurposer Studio", "⚡ AI Generator Lab"]:
-        raise RuntimeError(f"unexpected tabs: {tabs}")
-    return f"page rendered with tabs {tabs[:2]}"
+    box = at.selectbox(key="lab_mode")
+    modes = list(box.options)
+    if modes != ["Idea2Video", "Novel2Video", "Script2Video", "Clip Repurposer"]:
+        raise RuntimeError(f"unexpected creation modes: {modes}")
+    expect = {"Idea2Video": "story_text_idea2video", "Novel2Video": "story_text_novel2video",
+              "Script2Video": "story_text_script2video", "Clip Repurposer": "vugola_url"}
+    for mode in modes:  # every mode must draw without errors and show its own main field
+        at.selectbox(key="lab_mode").select(mode).run()
+        if at.exception:
+            raise RuntimeError(f"{mode}: " + "; ".join(str(e.value) for e in at.exception))
+        keys = {w.key for w in list(at.text_area) + list(at.text_input)}
+        if expect[mode] not in keys:
+            raise RuntimeError(f"{mode}: missing the field {expect[mode]}")
+    at.selectbox(key="lab_mode").select("Idea2Video").run()
+    at.selectbox(key="idea_flavor").select("Narrated video with a 3D avatar (classic)").run()
+    if at.exception or "viewmax_prompt" not in {w.key for w in at.text_area}:
+        raise RuntimeError("the classic narrated generator did not draw")
+    return f"all {len(modes)} creation modes (+ classic generator) render"
 
 
 def check_tts_online() -> str:

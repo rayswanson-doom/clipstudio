@@ -1,7 +1,7 @@
 """Playwright layout test for the real Streamlit app.
 
 Starts `streamlit run frontend/app.py`, opens it in headless Chromium and checks
-the two tabs, the sidebar Folder ID field, the main controls, validation
+the four creation modes, the sidebar Folder ID field, the main controls, validation
 messages, and that nothing overflows horizontally on desktop or phone widths.
 Screenshots go to tests/ui/screenshots/.
 
@@ -88,15 +88,29 @@ class LayoutTests(unittest.TestCase):
                     pass
                 page.close()
 
-    def open(self, width=1280, height=800, demo=False):
+    CLASSIC = "Narrated video with a 3D avatar (classic)"
+
+    def choose(self, page, label, option):
+        """Pick an option of a Streamlit selectbox the way a user does."""
+        page.get_by_label(label, exact=True).click()
+        page.get_by_role("option", name=option, exact=True).click()
+
+    def open(self, width=1280, height=800, demo=False, mode=None):
+        """mode: None (the default, Idea2Video), a creation-mode name, or "classic" (Idea2Video > narrated generator)."""
         page = self.browser.new_page(viewport={"width": width, "height": height})
         self.opened.append(page)
         page.goto(URL + ("/?demo=1" if demo else ""))
-        page.get_by_role("tab", name="🎬 Clip Repurposer Studio").wait_for(timeout=30000)
-        # Streamlit paints progressively: wait for the real controls, not just the tab strip
-        page.get_by_label("YouTube URL").wait_for(state="visible", timeout=30000)
+        # Streamlit paints progressively: wait for the real controls, not just the page shell
+        page.get_by_label("Creation mode", exact=True).wait_for(state="visible", timeout=30000)
         if width > 640:
             page.get_by_label("Google Drive Folder ID", exact=True).wait_for(state="visible", timeout=30000)
+        if mode == "classic":
+            self.choose(page, "Output style", self.CLASSIC)
+            page.get_by_label("What should the video be about?").wait_for(state="visible", timeout=15000)
+        elif mode:
+            self.choose(page, "Creation mode", mode)
+            wait = {"Clip Repurposer": "YouTube URL"}.get(mode, "Your novel or long text" if mode == "Novel2Video" else "Your screenplay")
+            page.get_by_label(wait).wait_for(state="visible", timeout=15000)
         return page
 
     def assert_no_horizontal_overflow(self, page):
@@ -124,14 +138,15 @@ class LayoutTests(unittest.TestCase):
 
     def test_demo_cards_and_badges(self):
         for w, h, name in ((1280, 800, "desktop"), (390, 844, "phone")):
-            page = self.open(w, h, demo=True)
+            page = self.open(w, h, demo=True, mode="Clip Repurposer")
             page.get_by_text("Top score").first.wait_for(timeout=15000)
             page.get_by_text("Clips created").first.wait_for(state="visible", timeout=15000)
             page.locator(".cp-badge.score").first.wait_for(state="visible", timeout=15000)
             self.assertGreaterEqual(page.locator(".cp-quote").count(), 2)
             self.assert_no_horizontal_overflow(page)
             page.screenshot(path=str(SHOTS / f"{name}_demo_clips.png"), full_page=True)
-            page.get_by_role("tab", name="⚡ AI Generator Lab").click()
+            self.choose(page, "Creation mode", "Idea2Video")
+            self.choose(page, "Output style", self.CLASSIC)
             page.get_by_text("Est. length").first.wait_for(timeout=10000)
             self.assert_no_horizontal_overflow(page)
             page.screenshot(path=str(SHOTS / f"{name}_demo_lab.png"), full_page=True)
@@ -152,8 +167,7 @@ class LayoutTests(unittest.TestCase):
 
     def test_avatar_checkbox_enables_uploader_and_phone_fits(self):
         for w, h, name in ((1280, 800, "desktop"), (390, 844, "phone")):
-            page = self.open(w, h)
-            page.get_by_role("tab", name="⚡ AI Generator Lab").click()
+            page = self.open(w, h, mode="classic")
             box = page.get_by_text("Enable AI Avatar Lip-Sync Commentary")
             box.wait_for(state="visible", timeout=15000)
             drop = page.locator('[data-testid="stFileUploader"]').filter(has_text="Your model").locator(
@@ -170,18 +184,62 @@ class LayoutTests(unittest.TestCase):
             page.screenshot(path=str(SHOTS / f"{name}_avatar.png"), full_page=True)
             page.close()
 
-    def test_two_tabs_and_sidebar(self):
+    def test_four_creation_modes_and_sidebar(self):
         page = self.open()
-        self.assertTrue(page.get_by_role("tab", name="🎬 Clip Repurposer Studio").is_visible())
-        self.assertTrue(page.get_by_role("tab", name="⚡ AI Generator Lab").is_visible())
-        self.assertTrue(page.get_by_role("tab", name="🎞️ Story Studio").is_visible())
         sidebar = page.locator('[data-testid="stSidebar"]')
         self.assertTrue(sidebar.get_by_label("Google Drive Folder ID", exact=True).is_visible())
-        page.screenshot(path=str(SHOTS / "desktop_clips.png"), full_page=True)
+        self.assertEqual(page.get_by_role("tab").count(), 0)  # one Lab, not separate tabs
+        page.get_by_label("Creation mode", exact=True).click()
+        for name in ("Idea2Video", "Novel2Video", "Script2Video", "Clip Repurposer"):
+            self.assertTrue(page.get_by_role("option", name=name, exact=True).is_visible(), name)
+        page.keyboard.press("Escape")
+        page.screenshot(path=str(SHOTS / "desktop_home_modes.png"), full_page=True)
+        page.close()
+
+    def test_story_modes_show_their_own_controls(self):
+        for mode, field, uploader in (("Idea2Video", "Your idea", False), ("Novel2Video", "Your novel or long text", True),
+                                      ("Script2Video", "Your screenplay", True)):
+            page = self.open(mode=None if mode == "Idea2Video" else mode)
+            page.get_by_label(field).wait_for(state="visible", timeout=15000)
+            self.assertEqual(page.get_by_text("...or upload a text file").count(), 1 if uploader else 0, mode)
+            page.get_by_role("button", name="Create the video").wait_for(state="visible", timeout=10000)
+            for header in ("Story options", "Character consistency", "Camera angle preferences", "Podcast corner avatar overlay"):
+                page.get_by_text(header, exact=True).wait_for(state="visible", timeout=10000)
+            self.assertEqual(page.get_by_label("YouTube URL").count(), 0)
+            page.screenshot(path=str(SHOTS / f"desktop_{mode}.png"), full_page=True)
+            page.close()
+
+    def test_consistency_camera_and_corner_controls(self):
+        page = self.open()
+        page.get_by_text("Character consistency", exact=True).click()
+        page.get_by_text("Show each character's portrait in every shot they appear in").wait_for(state="visible", timeout=10000)
+        page.get_by_text("Start each shot from the previous shot's last frame (scene continuity)").wait_for(state="visible", timeout=10000)
+        page.get_by_text("Camera angle preferences", exact=True).click()
+        for label in ("Shot size", "Camera angle", "Camera movement"):
+            page.get_by_label(label, exact=True).wait_for(state="visible", timeout=10000)
+        page.get_by_text("Podcast corner avatar overlay", exact=True).click()
+        box = page.get_by_text("Show a host / narrator avatar in a corner")
+        box.wait_for(state="visible", timeout=10000)
+        corner = page.get_by_label("Corner", exact=True)
+        self.assertTrue(corner.is_disabled())
+        box.click()
+        page.wait_for_function("""() => { const e = [...document.querySelectorAll('input')].find(
+            i => i.getAttribute('aria-label') === 'Corner'); return !!e && !e.disabled; }""", timeout=10000)
+        self.choose(page, "Corner", "Custom Coordinates")
+        page.get_by_label("X (pixels from the left)").wait_for(state="visible", timeout=10000)
+        page.get_by_label("Y (pixels from the top)").wait_for(state="visible", timeout=10000)
+        self.assert_no_horizontal_overflow(page)
+        page.screenshot(path=str(SHOTS / "desktop_story_options.png"), full_page=True)
+        page.close()
+
+    def test_story_validation_message(self):
+        page = self.open(mode="Script2Video")
+        page.get_by_role("button", name="Create the video").click()
+        page.get_by_text("Type or upload some text first.").wait_for(timeout=10000)
         page.close()
 
     def test_clip_tab_controls(self):
-        page = self.open()
+        page = self.open(mode="Clip Repurposer")
         page.get_by_label("YouTube URL").wait_for(state="visible", timeout=15000)
         page.get_by_text("or upload a video file").wait_for(state="visible", timeout=10000)
         page.get_by_role("button", name="Generate viral clips").wait_for(state="visible", timeout=10000)
@@ -190,8 +248,7 @@ class LayoutTests(unittest.TestCase):
         page.close()
 
     def test_lab_tab_controls_including_script_and_actions(self):
-        page = self.open()
-        page.get_by_role("tab", name="⚡ AI Generator Lab").click()
+        page = self.open(mode="classic")
         page.get_by_label("What should the video be about?").wait_for(state="visible", timeout=15000)
         page.get_by_role("button", name="Generate video").wait_for(state="visible", timeout=10000)
         page.get_by_text("Script & action narration (optional)").click()
@@ -205,10 +262,11 @@ class LayoutTests(unittest.TestCase):
         page.close()
 
     def test_validation_messages(self):
-        page = self.open()
+        page = self.open(mode="Clip Repurposer")
         page.get_by_role("button", name="Generate viral clips").click()
         page.get_by_text("Paste a YouTube URL or upload a video first.").wait_for(timeout=10000)
-        page.get_by_role("tab", name="⚡ AI Generator Lab").click()
+        self.choose(page, "Creation mode", "Idea2Video")
+        self.choose(page, "Output style", self.CLASSIC)
         page.get_by_role("button", name="Generate video").click()
         page.get_by_text("Enter a prompt or paste your own script first.").wait_for(timeout=10000)
         page.close()
@@ -217,7 +275,11 @@ class LayoutTests(unittest.TestCase):
         for w, h, name in ((1280, 800, "desktop"), (390, 844, "phone")):
             page = self.open(w, h)
             self.assert_no_horizontal_overflow(page)
-            page.get_by_role("tab", name="⚡ AI Generator Lab").click()
+            for header in ("Character consistency", "Camera angle preferences", "Podcast corner avatar overlay"):
+                page.get_by_text(header, exact=True).click()
+            self.assert_no_horizontal_overflow(page)
+            page.screenshot(path=str(SHOTS / f"{name}_story_open.png"), full_page=True)
+            self.choose(page, "Output style", self.CLASSIC)
             page.get_by_label("What should the video be about?").wait_for(state="visible", timeout=15000)
             page.get_by_text("Script & action narration (optional)").click()
             page.get_by_label("Your own script").wait_for(state="visible", timeout=10000)

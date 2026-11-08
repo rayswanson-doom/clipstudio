@@ -34,9 +34,7 @@ import pipeline  # noqa: E402
 import uploader  # noqa: E402
 
 APP_NAME = "CinePulse AI"
-TAB_CLIP = "🎬 Clip Repurposer Studio"
 TAB_LAB = "⚡ AI Generator Lab"
-TAB_STORY = "🎞️ Story Studio"
 
 
 def _output_dir() -> Path:
@@ -60,10 +58,21 @@ AVATAR_TYPES = ["glb", "vrm", "jpg", "jpeg", "png"]  # 3D models first, pictures
 MODEL_TYPES = {"Photorealistic Human": "human", "AI Model": "ai", "Anime": "anime"}
 AUDIO_TYPES = ["mp3", "wav", "m4a", "ogg"]
 OCR_CHOICES = {"Auto (PaddleOCR if installed)": "auto", "PaddleOCR": "paddleocr", "RapidOCR (built in)": "rapidocr"}
-STORY_MODES = {"Idea → video": "idea2video", "Screenplay → video (Script2Video)": "script2video",
-               "Novel / long text → episode (Novel2Video)": "novel2video"}
+LAB_MODES = {"Idea2Video": "idea2video", "Novel2Video": "novel2video", "Script2Video": "script2video",
+             "Clip Repurposer": "clips"}
+MODE_BLURB = {
+    "idea2video": "One prompt in, a whole episodic video out: the agents write, cast, storyboard and render it.",
+    "novel2video": "Upload a long text or novel: it is read in chapters, boiled down to episode scripts and rendered as episodes.",
+    "script2video": "Paste a screenplay (INT./EXT., names, parentheticals, dialogue): it becomes a timed multi-shot video.",
+    "clips": "Cut a long video into short vertical clips with MediaPipe face tracking and OCR text reading.",
+}
+IDEA_FLAVORS = {"Episodic story video (ViMax agents)": "story", "Narrated video with a 3D avatar (classic)": "classic"}
 STORY_PROVIDERS = {"Offline - built-in rules (no key, no internet)": "offline", "Groq (needs an API key)": "groq",
                    "Gemini (needs an API key)": "gemini"}
+CAMERA_SIZES = {"Auto (let the script decide)": "auto", "Close-ups": "close", "Medium shots": "medium", "Wide shots": "wide"}
+CAMERA_ANGLES = {"Auto": "auto", "Eye level": "eye", "Low angle (heroic)": "low", "High angle": "high", "Dutch tilt (tense)": "dutch"}
+CAMERA_MOVES = {"Auto": "auto", "Static": "static", "Slow push-in": "push", "Handheld": "handheld", "Slow pan": "pan"}
+HOST_POSITIONS = list(pipeline.PIP_PRESETS)
 STORY_TEXT_TYPES = ["txt", "md", "fountain"]
 BACKDROPS = {"Aurora (blue / magenta)": "aurora", "Sunset": "sunset", "Mono (dark grey)": "mono"}
 QUALITY_CHOICES = {"Balanced": "balanced", "Fast (low-spec laptops)": "fast", "High (slower, smoother edges)": "high"}
@@ -499,9 +508,8 @@ def render_layout_preview(position: str, xy, scale: float, avatar_file) -> None:
         st.caption(f"Layout preview unavailable ({exc}).")
 
 
-def render_lab_tab(folder_id: str) -> None:
-    section_header("AI Generator Lab",
-                   "Describe a video. Get a script, a natural voiceover and a finished vertical video.")
+def render_narrated_generator(folder_id: str) -> None:
+    """The original generator: prompt -> script -> voiceover -> video with an optional lip-synced 3D avatar."""
     st.markdown(steps_html(["Prompt", "Script", "Voiceover", "Avatar / video merge", "Drive upload"]),
                 unsafe_allow_html=True)
 
@@ -677,37 +685,85 @@ def render_lab_tab(folder_id: str) -> None:
                 st.link_button("Open in Google Drive", result["drive_link"])
 
 
-def render_story_tab(folder_id: str) -> None:
-    section_header("Story Studio",
-                   "Turn an idea, a screenplay or a novel into a consistent multi-shot storyboard, then an animatic. "
-                   "Runs on your CPU - no GPU needed.")
-    st.markdown(steps_html(["Director", "Screenwriter", "Characters", "Storyboard", "Consistency check", "Render"]),
+def render_story_panel(folder_id: str, mode: str) -> None:
+    """Idea2Video / Novel2Video / Script2Video: the ViMax-style agents plan it, the CPU renderer makes it, Drive keeps it."""
+    st.markdown(steps_html(["Director", "Screenwriter", "Characters", "Storyboard", "Consistency check", "Render", "Drive backup"]),
                 unsafe_allow_html=True)
-    mode_label = st.selectbox("What are you starting from?", list(STORY_MODES), key="story_mode")
-    mode = STORY_MODES[mode_label]
-    hints = {"idea2video": "Describe the story in a few sentences.",
+    hints = {"idea2video": "Describe the story in a few sentences. Each episode takes its share of it.",
              "script2video": "Paste a screenplay: INT./EXT. headings, CHARACTER names, (parentheticals) and dialogue.",
              "novel2video": "Paste a chapter or a whole novel, or upload a .txt file below."}
-    text = st.text_area("Your text", key="story_text", height=200, placeholder=hints[mode])
-    upload = st.file_uploader("...or upload a text file", type=STORY_TEXT_TYPES, key="story_file")
+    text = st.text_area({"idea2video": "Your idea", "script2video": "Your screenplay", "novel2video": "Your novel or long text"}[mode],
+                        key=f"story_text_{mode}", height=200, placeholder=hints[mode])
+    upload = None
+    if mode != "idea2video":
+        upload = st.file_uploader("...or upload a text file", type=STORY_TEXT_TYPES, key=f"story_file_{mode}")
+
     with st.expander("Story options", expanded=False):
         c1, c2 = st.columns(2)
         with c1:
             style_label = st.selectbox("Character style", list(MODEL_TYPES), key="story_style")
-            seconds = st.slider("Target length (seconds)", 15, 180, 45, key="story_seconds")
+            seconds = st.slider("Length of each video (seconds)", 15, 180, 45, key="story_seconds")
         with c2:
             provider_label = st.selectbox("Writing assistant", list(STORY_PROVIDERS), key="story_provider",
                                           help="Offline uses fixed rules. Groq or Gemini can rewrite and enrich the "
                                                "storyboard; only that text is sent to the provider.")
-            episode = st.number_input("Episode (novels)", 1, 50, 1, key="story_episode", disabled=mode != "novel2video")
         api_key = st.text_input("API key (used for this run only, never saved)", value="", key="story_api_key",
                                 type="password", disabled=STORY_PROVIDERS[provider_label] == "offline")
-        render_on = st.checkbox("Also render a preview video", value=True, key="story_render")
+        episodes, episode, all_eps = 1, 1, False
+        if mode in ("idea2video", "novel2video"):
+            e1, e2, e3 = st.columns(3)
+            with e1:
+                episodes = st.number_input("Episodes", 1, 12, 3 if mode == "novel2video" else 1, key="story_episodes")
+            with e2:
+                all_eps = st.checkbox("Make every episode", value=mode == "novel2video", key="story_all_episodes")
+            with e3:
+                episode = st.number_input("...or just episode", 1, 12, 1, key="story_episode", disabled=bool(all_eps))
+        render_on = st.checkbox("Also render the videos", value=True, key="story_render")
         voice_on = st.checkbox("Add a narrator voice (needs internet)", value=False, key="story_voice", disabled=not render_on)
-        st.caption("The preview is a stylised animatic: painted character portraits, location backdrops and subtitles, "
-                   "with each character looking the same in every shot. It is not photorealistic AI video.")
+        st.caption("The video is a stylised animatic: painted character portraits, location backdrops and subtitles. "
+                   "It is not photorealistic AI video. Finished videos and their project files are backed up to the "
+                   "Google Drive folder from the sidebar.")
 
-    if st.button("Plan the story", type="primary", key="story_run"):
+    with st.expander("Character consistency", expanded=False):
+        portraits_on = st.checkbox("Show each character's portrait in every shot they appear in", value=True, key="story_portraits")
+        continuity_on = st.checkbox("Start each shot from the previous shot's last frame (scene continuity)", value=True,
+                                    key="story_continuity")
+        tolerance = st.slider("Appearance drift tolerance (%)", 10, 60, 35, key="story_tolerance",
+                              help="How much a character may differ from their anchor portrait before the drift report "
+                                   "flags it. Lower is stricter.")
+
+    with st.expander("Camera angle preferences", expanded=False):
+        k1, k2, k3 = st.columns(3)
+        with k1:
+            size_label = st.selectbox("Shot size", list(CAMERA_SIZES), key="story_cam_size")
+        with k2:
+            angle_label = st.selectbox("Camera angle", list(CAMERA_ANGLES), key="story_cam_angle")
+        with k3:
+            move_label = st.selectbox("Camera movement", list(CAMERA_MOVES), key="story_cam_move")
+        st.caption("Applied to every shot except the opening establishing shots, which stay wide. Close-ups also get larger "
+                   "character portraits and static shots hold the backdrop still.")
+
+    with st.expander("Podcast corner avatar overlay", expanded=False):
+        host_on = st.checkbox("Show a host / narrator avatar in a corner", value=False, key="story_host_on")
+        host_file = st.file_uploader("Host picture (optional - a drawn host is used when empty)", type=["png", "jpg", "jpeg"],
+                                     key="story_host_file", disabled=not host_on)
+        h1, h2 = st.columns(2)
+        with h1:
+            host_pos = st.selectbox("Corner", HOST_POSITIONS, key="story_host_pos", disabled=not host_on)
+        with h2:
+            host_scale = st.slider("Avatar size (% of the video width)", 15, 50, 28, key="story_host_scale", disabled=not host_on)
+        host_xy = None
+        if host_on and host_pos == "Custom Coordinates":
+            x1, x2 = st.columns(2)
+            with x1:
+                hx = st.number_input("X (pixels from the left)", 0, 1080, 40, key="story_host_x")
+            with x2:
+                hy = st.number_input("Y (pixels from the top)", 0, 1920, 1200, key="story_host_y")
+            host_xy = (int(hx), int(hy))
+        st.caption("The host is a framed still portrait. The lip-synced 3D avatar is in Idea2Video > "
+                   "'Narrated video with a 3D avatar (classic)'. Story characters keep clear of the host's corner.")
+
+    if st.button("Create the video" if render_on else "Plan the story", type="primary", key="story_run"):
         temp = []
         try:
             source = text
@@ -721,42 +777,69 @@ def render_story_tab(folder_id: str) -> None:
             else:
                 callback, bar = make_progress()
                 provider = STORY_PROVIDERS[provider_label]
+                host = None
+                if host_on:
+                    host = {"style": MODEL_TYPES[style_label], "position": host_pos, "xy": host_xy, "scale": host_scale / 100.0}
+                    if host_file is not None:
+                        hp = save_upload(host_file)
+                        temp.append(hp)
+                        host["image"] = hp
                 st.session_state["story_result"] = pipeline.run_story_pipeline(
                     source, mode=mode, folder_id=folder_id or None, output_dir=str(OUTPUT_DIR), progress=callback,
                     provider=provider, api_key=(api_key.strip() or None) if provider != "offline" else None,
                     style=MODEL_TYPES[style_label], target_seconds=float(seconds), episode=int(episode),
-                    render=bool(render_on), voice=bool(voice_on and render_on))
+                    episodes=int(episodes) if mode in ("idea2video", "novel2video") and (all_eps or mode == "idea2video") else None,
+                    all_episodes=bool(all_eps), render=bool(render_on), voice=bool(voice_on and render_on),
+                    camera={"size": CAMERA_SIZES[size_label], "angle": CAMERA_ANGLES[angle_label], "movement": CAMERA_MOVES[move_label]},
+                    use_portraits=bool(portraits_on), continuity=bool(continuity_on), drift_threshold=tolerance / 100.0,
+                    host_avatar=host)
         except Exception as exc:
             st.session_state.pop("story_result", None)
             st.error(f"Something went wrong: {exc}")
         finally:
             cleanup_uploads(temp)
 
-    result = st.session_state.get("story_result")
-    if not result:
+    show_story_result(st.session_state.get("story_result"), mode)
+
+
+def show_story_result(result, mode: str) -> None:
+    if not result or result.get("mode") != mode:
         return
     show_warnings(result.get("warnings"))
     shots = result["storyboard"]["shots"]
+    eps = result.get("episodes_out") or ([{"episode": 1, "title": result["plan"].get("title"), "video_path": result.get("video_path"),
+                                           "shots": len(shots), "seconds": result["storyboard"]["total_duration"],
+                                           "drive_link": result.get("drive_link"), "project_link": result.get("project_link")}]
+                                         if result.get("video_path") else [])
     errors = [i for i in result["issues"] if i["severity"] == "error"]
-    st.markdown(stat_tiles([(len(shots), "Shots"), (f"{result['storyboard']['total_duration']:.1f}s", "Length"),
+    saved = len(result.get("drive_links") or [])
+    st.markdown(stat_tiles([(len(eps) or 1, "Episodes"), (len(shots), "Shots (ep. 1)"),
+                            (f"{result['storyboard']['total_duration']:.1f}s", "Length (ep. 1)"),
                             (len(result["characters"]), "Characters"),
                             ("Yes" if not errors else f"{len(errors)} left", "Consistency OK"),
-                            ("Yes" if result.get("drive_link") else "No", "Backed up to Drive")]), unsafe_allow_html=True)
-    if result.get("video_path"):
-        st.video(result["video_path"])
-        if result.get("drive_link"):
-            st.link_button("Open in Google Drive", result["drive_link"])
+                            (saved, "Videos backed up to Drive")]), unsafe_allow_html=True)
+    for ep in eps:
+        with st.container(border=True):
+            st.markdown(f'<div class="cp-clip-head"><span class="cp-rank">Episode {int(ep["episode"])}</span></div>',
+                        unsafe_allow_html=True)
+            st.markdown(f"**{_e(ep.get('title') or 'Untitled')}** - {ep['shots']} shots, {ep['seconds']:.1f}s")
+            if ep.get("video_path"):
+                st.video(ep["video_path"])
+            if ep.get("drive_link"):
+                st.link_button("Open in Google Drive", ep["drive_link"])
+            if ep.get("project_link"):
+                st.link_button("Open the project files on Drive", ep["project_link"])
     with st.container(border=True):
         st.markdown('<div class="cp-clip-head"><span class="cp-rank">Characters</span></div>', unsafe_allow_html=True)
         for c in result["characters"]:
             st.markdown(f"**{_e(c['name'])}** - {_e(c['visual_identifier'])}")
-    with st.expander("Shot list", expanded=True):
+    with st.expander("Shot list (episode 1)", expanded=True):
         for s in shots:
             who = ", ".join(s["characters"]) or "-"
             st.markdown(f"**{s['idx'] + 1}.** {s['start']:.1f}-{s['end']:.1f}s - {_e(s['shot_type'])}, "
                         f"{_e(s['camera_angle'])}, {_e(s['camera_movement'])} - {_e(who)}")
             st.caption(s["camera_prompt"])
-    with st.expander("Script"):
+    with st.expander("Script (episode 1)"):
         st.code(result["script"], language=None)
     with st.expander("How the agents worked"):
         for t in result["trace"]:
@@ -767,6 +850,23 @@ def render_story_tab(folder_id: str) -> None:
             worst = max(d["distance"] for d in result["drift"])
             st.markdown(f"- Appearance drift check: worst distance {worst:.2f} over {len(result['drift'])} appearances")
     st.caption(f"Project files saved in: {result['project_dir']}")
+
+
+def render_lab(folder_id: str) -> None:
+    section_header("AI Generator Lab", "Pick what you want to make. Everything runs on your computer's CPU.")
+    mode_label = st.selectbox("Creation mode", list(LAB_MODES), key="lab_mode")
+    mode = LAB_MODES[mode_label]
+    st.caption(MODE_BLURB[mode])
+    if mode == "clips":
+        render_clip_tab(folder_id)
+    elif mode == "idea2video":
+        flavor = st.selectbox("Output style", list(IDEA_FLAVORS), key="idea_flavor")
+        if IDEA_FLAVORS[flavor] == "classic":
+            render_narrated_generator(folder_id)
+        else:
+            render_story_panel(folder_id, mode)
+    else:
+        render_story_panel(folder_id, mode)
 
 
 # --------------------------------------------------------------------------- #
@@ -790,13 +890,7 @@ def main() -> None:
         st.session_state.setdefault("viewmax_result", DEMO_LAB)
     folder_id = render_sidebar()
     render_hero()
-    tab_clip, tab_lab, tab_story = st.tabs([TAB_CLIP, TAB_LAB, TAB_STORY])
-    with tab_clip:
-        render_clip_tab(folder_id)
-    with tab_lab:
-        render_lab_tab(folder_id)
-    with tab_story:
-        render_story_tab(folder_id)
+    render_lab(folder_id)
     st.markdown(f'<div class="cp-foot">{APP_NAME} · everything runs locally · your files never leave this computer '
                 'except the Drive backup you enable</div>', unsafe_allow_html=True)
 

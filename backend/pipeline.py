@@ -34,6 +34,7 @@ try:  # package import (backend.pipeline) or plain module (pipeline)
     from .scorer import align_cues, build_narration, find_viral_clips
     from .transcriber import transcribe_audio
     from .tts_engine import DEFAULT_VOICE, generate_voiceover
+    from . import uploader as _uploader_mod
     from .uploader import DriveBackup, download_media, drive_status, upload_to_google_drive
     from .video_engine import create_vertical_short, merge_audio_with_video, normalize_position_preset, place_podcast_avatar, PIP_PRESETS
 except ImportError:  # pragma: no cover
@@ -47,6 +48,7 @@ except ImportError:  # pragma: no cover
     from scorer import align_cues, build_narration, find_viral_clips
     from transcriber import transcribe_audio
     from tts_engine import DEFAULT_VOICE, generate_voiceover
+    import uploader as _uploader_mod
     from uploader import DriveBackup, download_media, drive_status, upload_to_google_drive
     from video_engine import create_vertical_short, merge_audio_with_video, normalize_position_preset, place_podcast_avatar, PIP_PRESETS
 
@@ -519,21 +521,39 @@ def run_story_pipeline(
     target_seconds: float = 45.0,
     episode: int = 1,
     episodes: Optional[int] = None,
+    all_episodes: bool = False,
     max_shots: Optional[int] = None,
     render: bool = True,
     voice: bool = False,
     voice_name: str = DEFAULT_VOICE,
     size: tuple = (540, 960),
     fps: int = 20,
+    camera: Optional[dict] = None,
+    use_portraits: bool = True,
+    continuity: bool = True,
+    drift_threshold: float = 0.35,
+    host_avatar: Optional[dict] = None,
     transport=None,
 ) -> dict:
-    """Idea / screenplay / novel -> multi-shot storyboard (+ optional CPU animatic), on any computer (no GPU).
+    """Idea / screenplay / novel -> multi-shot storyboard (+ CPU animatic) -> Google Drive, on any computer (no GPU).
 
-    The ViMax-style agents (backend/vimax_orchestrator.py) run first; `provider` "offline" uses built-in rules,
-    "groq" / "gemini" / "auto" ask that LLM for structured JSON (falls back to the rules with a warning when the
-    key is missing or the call fails). The API key is used only for that call and is never stored or returned.
-    Returns {"plan","script","characters","storyboard","graph","issues","trace","warnings","project_dir",
-    "video_path","drift","drive_link", ...}.
+    Modes: "idea2video", "novel2video", "script2video". The ViMax-style agents (backend/vimax_orchestrator.py)
+    run first; `provider` "offline" uses built-in rules, "groq" / "gemini" / "auto" ask that LLM for structured JSON
+    (falls back to the rules with a warning when the key is missing or a call fails). The API key is used only for
+    those calls and is never stored or returned.
+
+    `all_episodes` renders every episode of an idea (`episodes` of them) or a novel; otherwise just `episode`.
+    `camera` = {"size","angle","movement"} preferences; `use_portraits` / `continuity` / `drift_threshold` are the
+    character-consistency switches; `host_avatar` puts a podcast-style narrator portrait in a screen corner
+    ({"image","style","position","xy","scale"}).
+
+    Every finished render is backed up: each episode's video and a zip of its project files are uploaded to the Drive
+    folder as soon as that episode is done (a missing folder / sign-in or an upload failure becomes a warning; the
+    local files are never lost).
+
+    Returns the first episode's result ({"plan","script","characters","storyboard","graph","issues","trace",
+    "video_path","drift","drive_link", ...}) plus "episodes_out": one summary per episode ({"episode","title",
+    "video_path","project_dir","drive_link","project_link","shots","seconds","warnings"}), "drive_links" and "warnings".
     """
     try:
         from . import vimax_orchestrator as vo
@@ -548,42 +568,81 @@ def run_story_pipeline(
     except vo.LLMError as exc:
         warnings.append(f"{exc} Used the built-in rules instead.")
         llm = vo.OfflineClient()
-    _emit(progress, "Planning the story", 0.02)
-    result = vo.ViMaxOrchestrator(llm, progress=lambda f, m: _emit(progress, m, 0.02 + 0.38 * f)).run(
-        source, mode=mode, style=style, target_seconds=target_seconds, episode=episode, episodes=episodes,
-        max_shots=max_shots)
-    warnings.extend(result["warnings"])
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    name = f"story_{_safe_name(result['plan'].get('title') or 'story', 30)}_{stamp}"
-    project_dir = out_dir / name
-    vo.save_project(result, str(project_dir))
-    video_path, drift, drive_link = None, [], None
-    if render:
-        _emit(progress, "Rendering the animatic (CPU)", 0.42)
-        try:
-            rr = vo.render_storyboard(
-                result, str(out_dir / f"{name}.mp4"), work_dir=str(project_dir / "work"), size=tuple(size), fps=fps,
-                voice=voice, voice_name=voice_name, ffmpeg_path=ffmpeg_path,
-                progress=lambda f, m: _emit(progress, m, 0.42 + 0.46 * f))
-            video_path, drift = rr["output_path"], rr["drift"]
-            warnings.extend(w for w in rr["warnings"] if w not in warnings)
-            bad = [d for d in drift if d["status"] != "ok"]
-            if bad:
-                warnings.append(f"Appearance drift was measured in {len(bad)} shot(s); see the drift report.")
-        except Exception as exc:  # the plan is still valuable when rendering fails
-            logger.warning("story render failed: %s", exc)
-            warnings.append(f"The video could not be rendered ({exc}). The storyboard files were still saved.")
-    if video_path and folder_id is not None:
-        folder = _usable_folder(folder_id, warnings)
-        if folder:
-            _emit(progress, "Backing up to Google Drive", 0.92)
+    first: Optional[dict] = None
+    summaries: list = []
+    drive_links: list = []
+    folder_checked, folder = False, None
+    total = max(1, int(episodes or 1)) if all_episodes else 1
+    e = int(episode) if not all_episodes else 1
+    done = 0
+    while True:
+        label = f"Episode {e}: " if total > 1 else ""
+        base, span = done / total, 1.0 / total
+
+        def prog(stage, f, _b=base, _s=span, _l=label):
+            _emit(progress, _l + stage, _b + _s * f)
+
+        _emit(progress, label + "Planning the story", base + span * 0.02)
+        result = vo.ViMaxOrchestrator(llm, progress=lambda f, m: prog(m, 0.02 + 0.38 * f)).run(
+            source, mode=mode, style=style, target_seconds=target_seconds, episode=e,
+            episodes=(total if (all_episodes and mode == "idea2video") else episodes), max_shots=max_shots, camera=camera)
+        if all_episodes and mode == "novel2video" and done == 0:
+            total = max(1, int((result.get("novel") or {}).get("episodes") or 1))
+            base, span = 0.0, 1.0 / total
+        ep_warn = [w for w in result["warnings"]]
+        name = f"story_{_safe_name(result['plan'].get('title') or 'story', 30)}_{stamp}" + (f"_e{e}" if total > 1 else "")
+        project_dir = out_dir / name
+        vo.save_project(result, str(project_dir))
+        video_path, drift = None, []
+        if render:
+            prog("Rendering the animatic (CPU)", 0.42)
             try:
-                with DriveBackup(folder, upload_fn=upload_to_google_drive) as backup:
-                    drive_link = backup.submit(video_path).result()
-            except Exception as exc:
-                logger.warning("Drive backup failed: %s", exc)
-                warnings.append(f"Google Drive backup failed ({exc}). Your video is saved on this computer.")
+                rr = vo.render_storyboard(
+                    result, str(out_dir / f"{name}.mp4"), work_dir=str(project_dir / "work"), size=tuple(size), fps=fps,
+                    voice=voice, voice_name=voice_name, ffmpeg_path=ffmpeg_path, drift_threshold=drift_threshold,
+                    use_portraits=use_portraits, continuity=continuity, host=host_avatar,
+                    progress=lambda f, m: prog(m, 0.42 + 0.46 * f))
+                video_path, drift = rr["output_path"], rr["drift"]
+                ep_warn.extend(w for w in rr["warnings"] if w not in ep_warn)
+                bad = [d for d in drift if d["status"] != "ok"]
+                if bad:
+                    ep_warn.append(f"Appearance drift was measured in {len(bad)} shot(s); see the drift report.")
+            except Exception as exc:  # the plan is still valuable when rendering fails
+                logger.warning("story render failed: %s", exc)
+                ep_warn.append(f"The video could not be rendered ({exc}). The storyboard files were still saved.")
+        drive_link = project_link = None
+        if video_path:  # every finished render is backed up, together with its project files
+            if not folder_checked:
+                folder, folder_checked = _usable_folder(folder_id, ep_warn), True
+            if folder:
+                prog("Backing up to Google Drive", 0.92)
+                try:
+                    archive = _uploader_mod.zip_folder(str(project_dir), str(out_dir / f"{name}_project.zip"))
+                except Exception as exc:  # noqa: BLE001
+                    archive = None
+                    ep_warn.append(f"The project files could not be zipped for backup ({exc}).")
+                sent = _uploader_mod.backup_files([p for p in (video_path, archive) if p], folder, upload_fn=upload_to_google_drive)
+                drive_link = sent["links"].get(video_path)
+                project_link = sent["links"].get(archive) if archive else None
+                for path, msg in sent["errors"].items():
+                    ep_warn.append(f"Google Drive backup of {Path(path).name} failed ({msg}). It is saved on this computer.")
+                if drive_link:
+                    drive_links.append(drive_link)
+        result.update({"project_dir": str(project_dir), "video_path": video_path, "drift": drift,
+                       "drive_link": drive_link, "project_link": project_link, "rendered": bool(video_path)})
+        summaries.append({"episode": e, "title": result["plan"].get("title"), "video_path": video_path,
+                          "project_dir": str(project_dir), "drive_link": drive_link, "project_link": project_link,
+                          "shots": len(result["storyboard"]["shots"]), "seconds": result["storyboard"]["total_duration"],
+                          "drift": drift, "warnings": ep_warn})
+        warnings.extend(f"{label}{w}" for w in ep_warn if f"{label}{w}" not in warnings)
+        if first is None:
+            first = result
+        done += 1
+        e += 1
+        if not all_episodes or done >= total:
+            break
     _emit(progress, "Done", 1.0)
-    result.update({"warnings": warnings, "project_dir": str(project_dir), "video_path": video_path, "drift": drift,
-                   "drive_link": drive_link, "rendered": bool(video_path)})
-    return result
+    first["warnings"] = warnings
+    first.update({"episodes_out": summaries, "drive_links": drive_links})
+    return first

@@ -335,6 +335,54 @@ class DriveBackup:
         self.close()
 
 
+def backup_files(paths, folder_id: str, upload_fn: Optional[Callable[[str, str], str]] = None,
+                 attempts: int = 3, base_delay: float = 2.0, sleep: Callable[[float], None] = time.sleep) -> dict:
+    """Back up several finished files (e.g. every episode of a story and its project archive) to one Drive folder.
+
+    Returns {"links": {path: link}, "errors": {path: message}}. One failing file never stops the others and never
+    touches the local copy; missing paths are reported as errors. Uploads run one at a time on a single background
+    worker (the Google client is not thread-safe) with the same retry rules as DriveBackup.
+    """
+    out = {"links": {}, "errors": {}}
+    todo = []
+    for p in paths:
+        p = str(p)
+        if p in out["links"] or p in todo:
+            continue
+        if not Path(p).is_file():
+            out["errors"][p] = "file not found"
+        else:
+            todo.append(p)
+    if not todo:
+        return out
+    with DriveBackup(folder_id, upload_fn=upload_fn, attempts=attempts, base_delay=base_delay) as backup:
+        futures = [(p, backup.submit(p)) for p in todo]
+        for p, fut in futures:
+            try:
+                out["links"][p] = fut.result()
+            except Exception as exc:  # noqa: BLE001 - report it, keep going
+                out["errors"][p] = str(exc) or type(exc).__name__
+    return out
+
+
+def zip_folder(folder: str, zip_path: str, skip=("work",)) -> str:
+    """Zip a project folder (script, storyboard, characters, graph, subtitles...) for backup, leaving out the
+    scratch sub-folders named in `skip`. Returns zip_path."""
+    import zipfile
+
+    root = Path(folder)
+    if not root.is_dir():
+        raise FileNotFoundError(f"Folder not found: {folder}")
+    dest = Path(zip_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in sorted(root.rglob("*")):
+            rel = f.relative_to(root)
+            if f.is_file() and rel.parts[0] not in skip:
+                zf.write(f, rel.as_posix())
+    return str(dest)
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #

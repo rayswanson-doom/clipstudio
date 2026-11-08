@@ -58,14 +58,70 @@ class StoryPipelineTests(unittest.TestCase):
                 mock.patch.object(pipeline, "upload_to_google_drive", fake_upload):
             r, _ = self.run_it(mode="script2video", folder_id="FOLDER")
         self.assertEqual(r["drive_link"], "https://drive/x")
-        self.assertEqual(sent[0][1], "FOLDER")
-        self.assertTrue(sent[0][0].endswith(".mp4"))
+        self.assertEqual({f for _, f in sent}, {"FOLDER"})
+        self.assertEqual(sorted(n.rsplit(".", 1)[1] for n, _ in sent), ["mp4", "zip"])  # the render AND its project files
+        self.assertTrue(r["project_link"])
         with mock.patch.object(pipeline, "drive_status", return_value="ready"), \
                 mock.patch.object(pipeline, "upload_to_google_drive", side_effect=RuntimeError("boom")):
             r, _ = self.run_it(mode="script2video", folder_id="FOLDER")
         self.assertIsNone(r["drive_link"])
-        self.assertTrue(any("Drive backup failed" in w for w in r["warnings"]))
+        self.assertTrue(any("Google Drive backup of" in w and "boom" in w for w in r["warnings"]))
         self.assertTrue(os.path.isfile(r["video_path"]))
+
+    def test_no_folder_or_no_sign_in_warns_but_keeps_the_render(self):
+        r, _ = self.run_it(mode="script2video", folder_id=None)
+        self.assertTrue(any("NOT uploaded" in w for w in r["warnings"]))
+        self.assertTrue(os.path.isfile(r["video_path"]))
+        with mock.patch.object(pipeline, "drive_status", return_value="unavailable"):
+            r, _ = self.run_it(mode="script2video", folder_id="F")
+        self.assertTrue(any("not connected" in w for w in r["warnings"]))
+
+    def test_plan_only_uploads_nothing(self):
+        with mock.patch.object(pipeline, "drive_status", return_value="ready"), \
+                mock.patch.object(pipeline, "upload_to_google_drive", side_effect=AssertionError("no upload expected")):
+            r, _ = self.run_it(mode="script2video", folder_id="F", render=False)
+        self.assertIsNone(r["drive_link"])
+
+    def test_every_episode_of_a_novel_is_rendered_and_backed_up(self):
+        sent = []
+        with mock.patch.object(pipeline, "drive_status", return_value="ready"), \
+                mock.patch.object(pipeline, "upload_to_google_drive", lambda p, f: sent.append(os.path.basename(p)) or "L" + str(len(sent))):
+            r, _ = self.run_it(open(NOVEL, encoding="utf-8").read(), mode="novel2video", episodes=2, all_episodes=True,
+                               folder_id="F", size=(120, 214), fps=6, max_shots=3)
+        self.assertEqual([e["episode"] for e in r["episodes_out"]], [1, 2])
+        self.assertTrue(all(os.path.isfile(e["video_path"]) for e in r["episodes_out"]))
+        self.assertEqual(len(r["drive_links"]), 2)
+        self.assertEqual(sum(n.endswith(".mp4") for n in sent), 2)
+        self.assertEqual(sum(n.endswith("_project.zip") for n in sent), 2)
+        self.assertNotEqual(r["episodes_out"][0]["video_path"], r["episodes_out"][1]["video_path"])
+
+    def test_idea2video_makes_episodes_from_one_prompt(self):
+        idea = ("Mara waits in a small kitchen at night. Daniel arrives, soaked from the rain. "
+                "Mara says nothing. Daniel sits down. They talk until dawn. Morning comes. Mara smiles. Daniel leaves.")
+        r, _ = self.run_it(idea, mode="idea2video", episodes=2, all_episodes=True, render=False)
+        self.assertEqual(len(r["episodes_out"]), 2)
+        scripts = [open(os.path.join(e["project_dir"], "script.fountain"), encoding="utf-8").read() for e in r["episodes_out"]]
+        self.assertNotEqual(scripts[0], scripts[1])
+        self.assertIn("kitchen", scripts[0].lower())
+        self.assertEqual([e["episode"] for e in r["episodes_out"]], [1, 2])
+
+    def test_camera_preferences_reach_the_storyboard(self):
+        r, _ = self.run_it(mode="script2video", render=False, camera={"size": "close", "angle": "low", "movement": "push"})
+        shots = [s for s in r["storyboard"]["shots"] if s["kind"] != "establishing"]
+        self.assertTrue(all(s["shot_type"] == "close-up" and s["camera_angle"] == "low angle" and s["camera_movement"] == "slow push-in" for s in shots))
+        self.assertTrue(all("low angle" in s["camera_prompt"] and "close-up" in s["camera_prompt"] for s in shots))
+        self.assertEqual(r["camera"], {"size": "close", "angle": "low", "movement": "push"})
+        with self.assertRaises(ValueError):
+            self.run_it(mode="script2video", render=False, camera={"size": "huge"})
+
+    def test_host_overlay_and_consistency_switches(self):
+        r, _ = self.run_it(mode="script2video", host_avatar={"style": "anime", "position": "Top-Right", "scale": 0.3})
+        self.assertTrue(os.path.isfile(os.path.join(r["project_dir"], "work", "portrait_host.png")))
+        off, _ = self.run_it(mode="script2video", use_portraits=False, continuity=False)
+        self.assertEqual(off["drift"], [])  # no portraits on screen, so nothing to compare
+        self.assertTrue(os.path.isfile(off["video_path"]))
+        strict, _ = self.run_it(mode="script2video", drift_threshold=0.0)
+        self.assertTrue(any(d["status"] != "ok" for d in strict["drift"]))
 
     def test_render_failure_keeps_the_plan(self):
         from backend import vimax_orchestrator as vo

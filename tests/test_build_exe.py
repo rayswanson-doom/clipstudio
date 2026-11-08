@@ -272,7 +272,7 @@ class MainTests(unittest.TestCase):
             self.assertNotIn("WARNING: ffmpeg", out.getvalue())
             self.assertIn("Zip validation passed", out.getvalue())
             self.assertEqual(build_exe.validate_zip(z), [])
-            self.assertEqual(build_exe.ZIP_NAME, "CinePulseAI-Ultimate-Portable.zip")
+            self.assertEqual(build_exe.ZIP_NAME, "CinePulseAI-ViMax-Portable.zip")
 
     def test_errors_stop_before_pyinstaller(self):
         with tempfile.TemporaryDirectory() as d:
@@ -399,7 +399,7 @@ class GitPublishTests(unittest.TestCase):
         self.assertTrue(r["committed"] and r["pushed"])
         self.assertIn("a.py", r["files"])
         log = self.remote_log()
-        self.assertTrue(log.startswith("feat: add ViMax-style multi-agent storyboard pipeline (Novel2Video, Script2Video, character consistency graph) running on CPU only"))
+        self.assertTrue(log.startswith("feat: integrate ViMax multi-agent engine, Novel2Video, Script2Video, graph consistency, and automated build package"))
         self.assertIn("Claude-Session:", log)
 
     def test_second_run_with_nothing_new_does_not_fail_or_commit(self):
@@ -473,7 +473,7 @@ class PackagingContentsTests(unittest.TestCase):
         wf = (ROOT / ".github" / "workflows" / "build-windows-exe.yml").read_text(encoding="utf-8")
         self.assertIn("bundle_paddleocr", wf)
         self.assertIn("bundle_torch", wf)
-        self.assertIn("CinePulseAI-Ultimate-Portable.zip", wf)
+        self.assertIn("CinePulseAI-ViMax-Portable.zip", wf)
 
     def test_3d_modules_are_bundled_and_torch_is_opt_in(self):
         for m in ("avatar_3d_engine", "glb_model", "soft_raster", "lipsync_en", "avatar_gestures", "demo_avatars", "render_engine",

@@ -34,8 +34,8 @@ Time: ~15 min of your clicking + 30-60 min of waiting. Needs only a web browser.
    the models, builds with PyInstaller, then **starts the finished exe and checks it answers**
    (the smoke test) before saving anything.
 6. **Download**: when the run is green, scroll to **Artifacts** at the bottom of the run page ->
-   click **CinePulseAI-Ultimate-Portable**. GitHub wraps it once more, so you unzip twice:
-   download -> unzip -> inside is `CinePulseAI-Ultimate-Portable.zip` -> unzip that -> folder `CinePulseAI`.
+   click **CinePulseAI-ViMax-Portable**. GitHub wraps it once more, so you unzip twice:
+   download -> unzip -> inside is `CinePulseAI-ViMax-Portable.zip` -> unzip that -> folder `CinePulseAI`.
 7. **Run**: open the `CinePulseAI` folder, double-click **CinePulseAI.exe**. Wait 10-40 seconds on
    first start; your browser opens the app. If Windows SmartScreen warns about an unknown publisher:
    *More info -> Run anyway* (it is your own program).
@@ -84,7 +84,7 @@ Needs a PC that can handle ~5 GB of downloads and a long build.
 3. Preview the build (changes nothing):  `python build_exe.py --dry-run`
 4. Build:  `python build_exe.py`
    It downloads `ffmpeg.exe`, the face model and the Whisper model automatically if missing, then writes
-   `dist\CinePulseAI\` and `dist\CinePulseAI-Ultimate-Portable.zip`.
+   `dist\CinePulseAI\` and `dist\CinePulseAI-ViMax-Portable.zip`.
    - Use `--no-token` to leave `token.json` out. `--no-download` stops all downloads (you must then
      supply `bin\ffmpeg.exe` yourself).
 5. Run `dist\CinePulseAI\CinePulseAI.exe` (or send the zip to any Windows laptop).
@@ -159,7 +159,7 @@ easings. If composition fails the app falls back to the simple ffmpeg layout, th
 
 ## Story Studio (ViMax-style agents, CPU only)
 
-The **Story Studio** tab turns an idea, a screenplay or a novel into a storyboard and a preview video. Nothing needs a GPU.
+In the **AI Generator Lab**, the creation modes **Idea2Video**, **Novel2Video** and **Script2Video** turn an idea, a novel or a screenplay into episodes (storyboard + preview video). The fourth mode, **Clip Repurposer**, is the long-to-shorts clipper. Nothing needs a GPU.
 
 | Module | Role |
 |---|---|

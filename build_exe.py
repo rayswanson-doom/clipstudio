@@ -2,7 +2,7 @@
 build_exe.py  -  build the CinePulse AI Windows distribution with PyInstaller.
 
     python build_exe.py --dry-run     # scan + show the PyInstaller arguments, build nothing
-    python build_exe.py               # build dist/CinePulseAI/ and dist/CinePulseAI-Ultimate-Portable.zip
+    python build_exe.py               # build dist/CinePulseAI/ and dist/CinePulseAI-ViMax-Portable.zip
     python build_exe.py --ci          # same, for an unattended CI machine
     python build_exe.py --git-push    # ...then `git add .`, `git commit`, `git push origin main`
     python build_exe.py --git-only    # only the git step (no build)
@@ -47,9 +47,9 @@ from typing import List, Optional
 import build  # shared constants, preflight scan and helpers
 
 ROOT = Path(__file__).resolve().parent
-ZIP_NAME = "CinePulseAI-Ultimate-Portable.zip"
-COMMIT_MESSAGE = ("feat: add ViMax-style multi-agent storyboard pipeline (Novel2Video, Script2Video, "
-                  "character consistency graph) running on CPU only")
+ZIP_NAME = "CinePulseAI-ViMax-Portable.zip"
+COMMIT_MESSAGE = ("feat: integrate ViMax multi-agent engine, Novel2Video, Script2Video, graph consistency, "
+                  "and automated build package")
 COMMIT_TRAILERS = (
     "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>",
     "Claude-Session: https://claude.ai/code/session_01DZZzH74mQWkTiSWum5df7Q",
@@ -181,11 +181,13 @@ def finalize(app_dir: Path, root: Path = ROOT, include_token: bool = True) -> Li
         "There is no console window: use 'Quit CinePulse AI' in the sidebar to stop it.\n"
         "If nothing opens, read cinepulseai.log in this folder.\n\n"
         "Works offline: transcription, highlight scoring, face-tracked cropping, AI avatar lip-sync,\n"
+        "story videos from an idea, a novel or a screenplay (Idea2Video / Novel2Video / Script2Video, CPU only),\n"
         "3D avatars (.glb / .vrm: phoneme lip-sync, head + upper-body gestures) shown in a podcast corner frame,\n"
         "merging, and reading on-screen text (OCR). Needs internet: YouTube downloads, edge-tts voices, Google Drive backup.\n\n"
         "GOOGLE DRIVE AUTO-BACKUP (optional)\n"
         "  The app runs fine without it - everything is saved in the 'outputs' folder here.\n"
-        "  With a Folder ID set, every finished clip and avatar video is uploaded automatically in the\n"
+        "  With a Folder ID set, every finished clip, avatar video and story episode (plus its project files) is\n"
+        "  uploaded automatically in the\n"
         "  background (temporary network errors are retried). If Drive fails, your files stay on this computer.\n"
         "  token.json       -> put it in THIS folder (next to CinePulseAI.exe) for uploads with no sign-in.\n"
         "  credentials.json -> alternatively put your OAuth client file here; the first upload\n"
@@ -253,7 +255,8 @@ def validate_zip(zip_path: Path, top: Optional[str] = None) -> List[str]:
             for needle in ("CinePulse AI", "Clip Repurposer Studio", "AI Generator Lab",
                            "Enable AI Avatar Lip-Sync Commentary", "Your own script", "Visual actions",
                            "Model type", "Avatar position", "Text reader (OCR)", "Animated backdrop",
-                           "Story Studio", "Plan the story"):
+                           "Creation mode", "Idea2Video", "Novel2Video", "Script2Video",
+                           "Character consistency", "Camera angle preferences", "Podcast corner avatar overlay"):
                 if needle not in text:
                     problems.append(f"frontend/app.py in the zip lacks '{needle}'")
         if not any(n.startswith(f"{top}/") for n in names):

@@ -244,6 +244,53 @@ def make_client(provider: str = "auto", api_key: Optional[str] = None, model: Op
 
 
 # --------------------------------------------------------------------------- #
+# camera preferences
+# --------------------------------------------------------------------------- #
+CAMERA_SIZES = {"auto": None, "close": "close-up", "medium": "medium shot", "wide": "wide shot"}
+CAMERA_ANGLES = {"auto": None, "eye": "eye level", "low": "low angle", "high": "high angle", "dutch": "dutch angle"}
+CAMERA_MOVES = {"auto": None, "static": "static", "push": "slow push-in", "handheld": "handheld", "pan": "slow pan"}
+
+
+def normalize_camera(camera: Optional[dict]) -> dict:
+    """{"size","angle","movement"} each one of the CAMERA_* keys (default "auto"); unknown values are rejected."""
+    cam = {"size": "auto", "angle": "auto", "movement": "auto"}
+    for key, table in (("size", CAMERA_SIZES), ("angle", CAMERA_ANGLES), ("movement", CAMERA_MOVES)):
+        v = str((camera or {}).get(key, "auto") or "auto").lower()
+        if v not in table:
+            raise ValueError(f"camera {key} must be one of: {', '.join(table)}")
+        cam[key] = v
+    return cam
+
+
+def apply_camera_preferences(shots: List[dict], camera: Optional[dict]) -> int:
+    """Re-frame the shots the way the user prefers and keep every text field about the shot in step with it.
+    Establishing shots stay wide (they exist to show the place); the size preference applies to the others.
+    Returns the number of shots that changed."""
+    cam = normalize_camera(camera)
+    if all(v == "auto" for v in cam.values()):
+        return 0
+    changed = 0
+    for s in shots:
+        old = (s["shot_type"], s["camera_angle"], s["camera_movement"])
+        size = CAMERA_SIZES[cam["size"]] if s.get("kind") != "establishing" else None
+        new = (size or old[0], CAMERA_ANGLES[cam["angle"]] or old[1], CAMERA_MOVES[cam["movement"]] or old[2])
+        if new == old:
+            continue
+        for field in ("camera_prompt", "visual_desc", "ff_desc", "lf_desc", "motion_desc"):
+            text = s.get(field) or ""
+            text = text.replace(f"{old[0].capitalize()}, {old[1]}, {old[2]}", f"{new[0].capitalize()}, {new[1]}, {new[2]}", 1) \
+                if field == "visual_desc" else text.replace(f"{old[0]}, {old[1]}, {old[2]}", f"{new[0]}, {new[1]}, {new[2]}", 1)
+            text = text.replace(f"{old[0]} of", f"{new[0]} of").replace(f"the {old[2]} move", f"the {new[2]} move")
+            if field == "motion_desc" and text.startswith(old[2]):
+                text = new[2] + text[len(old[2]):]
+            s[field] = text
+        s["shot_type"], s["camera_angle"], s["camera_movement"] = new
+        s["variation_type"] = sp._variation(new[2])
+        changed += 1
+    return changed
+
+
+# --------------------------------------------------------------------------- #
 # agents
 # --------------------------------------------------------------------------- #
 def _slug(text: str) -> str:
@@ -322,6 +369,9 @@ class Director(Agent):
         return data
 
 
+_NOVEL_CACHE: Dict[tuple, dict] = {}  # an N-episode run reads the same novel N times; do it once
+
+
 class Screenwriter(Agent):
     name = "Screenwriter"
     SCHEMA = {"script": str}
@@ -334,13 +384,18 @@ class Screenwriter(Agent):
             script, note, used = source, "passed through (already a script)", False
         elif mode == "novel2video":
             n_eps = episodes or max(1, int(round(len(source.split()) / 1800)))
-            ad = na.adapt_novel(source, episodes=n_eps, seconds_per_episode=seconds_per_episode, embedder=embedder, progress=progress)
+            ckey = (len(source), zlib.crc32(source.encode("utf-8", "replace")), n_eps, round(float(seconds_per_episode), 1), embedder)
+            ad = _NOVEL_CACHE.get(ckey)
+            if ad is None:
+                ad = na.adapt_novel(source, episodes=n_eps, seconds_per_episode=seconds_per_episode, embedder=embedder, progress=progress)
+                _NOVEL_CACHE.clear()
+                _NOVEL_CACHE[ckey] = ad
             idx = min(max(1, episode), len(ad["episodes"])) - 1
             ep = ad["episodes"][idx]
             script, note, used = ep["script"], f"novel_adapter ({ad['embedder']}) episode {idx + 1}/{len(ad['episodes'])}", False
             extra["novel"] = {"characters": ad["characters"], "chapters": ad["chapters"], "episodes": len(ad["episodes"]),
                               "episode": idx + 1, "embedder": ad["embedder"], "beats": ad["beats"]}
-            self.warnings.extend(ad["warnings"])
+            self.warnings.extend(w for w in ad["warnings"] if w not in self.warnings)
             data, n2 = self._try_llm(
                 "You are a screenwriter. Rewrite the rough adaptation as a tight screenplay in standard format "
                 "(INT./EXT. headings, CHARACTER cues, parentheticals, dialogue). Keep every character name and the order "
@@ -350,16 +405,25 @@ class Screenwriter(Agent):
                 script, note, used = data["script"], f"{n2}; polished the extractive adaptation", True
         else:
             words = int(plan["target_seconds"] * 2.6)
+            n_ep = int(episodes or 1)
+            part = f" This is episode {episode} of {n_ep} of one story; write only that part and keep names and looks consistent." if n_ep > 1 else ""
+            sentences = sp._sentences(re.sub(r"\s+", " ", source)) if n_ep > 1 else []
+            if n_ep > 1 and sentences:  # offline: each episode takes its share of the idea's sentences
+                per = max(1, -(-len(sentences) // n_ep))
+                mine = sentences[(episode - 1) * per: episode * per] or sentences[-per:]
+                idea_for_rules = " ".join(mine)
+            else:
+                idea_for_rules = source
             data, note = self._try_llm(
                 "You are a screenwriter. Write a short screenplay for the plan in standard format (INT./EXT. headings with "
                 "time of day, CHARACTER cues in capitals, parentheticals, dialogue, action). Reply with ONLY JSON: "
-                f"{{\"script\": \"...\"}}. About {words} words.", "PLAN:\n" + json.dumps(plan)[:3000] + "\n\nIDEA:\n" + source[:3000], self.SCHEMA)
+                f"{{\"script\": \"...\"}}. About {words} words.{part}", "PLAN:\n" + json.dumps(plan)[:3000] + "\n\nIDEA:\n" + source[:3000], self.SCHEMA)
             if data and self._valid(data["script"]):
                 script, used = data["script"], True
             else:
                 if data:
                     self.warnings.append("Screenwriter: the model's script could not be parsed; used the built-in rules.")
-                script, used = self._offline_idea(source, plan), False
+                script, used = self._offline_idea(idea_for_rules, plan), False
                 note = "rule-based: the idea's sentences become scenes (not creative writing)"
         self._log(t0, used, note)
         return {"script": script.strip() + "\n", **extra}
@@ -479,19 +543,20 @@ class StoryboardArtist(Agent):
                          "lf_desc?": str, "camera_angle?": str, "camera_movement?": str, "duration?": (int, float)}]}
     TEXT_FIELDS = ("camera_prompt", "visual_desc", "motion_desc", "ff_desc", "lf_desc", "camera_angle", "camera_movement")
 
-    def run(self, script: str, characters: List[dict], plan: dict, max_shots: Optional[int]) -> dict:
+    def run(self, script: str, characters: List[dict], plan: dict, max_shots: Optional[int], camera: Optional[dict] = None) -> dict:
         t0 = time.time()
         manifest = sp.script_to_shots(script)
         shots = manifest["shots"]
         self.warnings.extend(manifest["warnings"])
+        reframed = apply_camera_preferences(shots, camera)
         if max_shots and len(shots) > max_shots:
             self.warnings.append(f"The storyboard has {len(shots)} shots; kept the first {max_shots} (max_shots).")
             shots = shots[:max_shots]
             shots[-1]["is_last"] = True
-        note, used = "rule-based: script_parser shot manifest with exact timing", False
+        note, used = "rule-based: script_parser shot manifest with exact timing" + (f"; camera preference applied to {reframed} shots" if reframed else ""), False
         refined = self._refine(shots, characters, plan)
         if refined:
-            used, note = True, f"{self.llm.provider}: refined camera prompts / descriptions for {refined} shots"
+            used, note = True, f"{self.llm.provider}: refined camera prompts / descriptions for {refined} shots" + (f"; camera preference applied to {reframed} shots" if reframed else "")
         self._retime(shots)
         self._log(t0, used, note)
         return {"shots": shots, "scenes": manifest["scenes"], "characters": manifest["characters"],
@@ -697,11 +762,12 @@ class ViMaxOrchestrator:
 
     def run(self, source: str, mode: str = "idea2video", style: str = "human", target_seconds: float = 45.0, episode: int = 1,
             episodes: Optional[int] = None, seconds_per_episode: Optional[float] = None, max_shots: Optional[int] = None,
-            aspect: str = "9:16", embedder: str = "auto") -> dict:
+            aspect: str = "9:16", embedder: str = "auto", camera: Optional[dict] = None) -> dict:
         if mode not in MODES:
             raise ValueError(f"mode must be one of: {', '.join(MODES)}")
         if style not in MODEL_STYLES:
             raise ValueError(f"style must be one of: {', '.join(MODEL_STYLES)}")
+        camera = normalize_camera(camera)
         source = str(source or "")
         if not source.strip():
             raise ValueError("Please provide an idea, a script or a novel text.")
@@ -711,7 +777,14 @@ class ViMaxOrchestrator:
         warnings: List[str] = []
         started = time.time()
         self._p(0.02, "Director: planning")
-        plan = Director(self.llm, trace, warnings).run(source, mode, style, target_seconds, aspect)
+        episode = max(1, int(episode or 1))
+        dir_source = source
+        if mode == "idea2video" and int(episodes or 1) > 1 and self.llm.offline:  # plan this episode's share of the idea
+            sents = sp._sentences(re.sub(r"\s+", " ", source))
+            if sents:
+                per = max(1, -(-len(sents) // int(episodes)))
+                dir_source = " ".join(sents[(episode - 1) * per: episode * per] or sents[-per:])
+        plan = Director(self.llm, trace, warnings).run(dir_source, mode, style, target_seconds, aspect)
         self._p(0.12, "Screenwriter: writing the script")
         spw = float(seconds_per_episode or target_seconds)
         sw = Screenwriter(self.llm, trace, warnings).run(source, mode, plan, episode, episodes, spw, embedder,
@@ -726,7 +799,7 @@ class ViMaxOrchestrator:
             script, parsed, plan, (sw["novel"] or {}).get("characters"))
         self._p(0.55, "Storyboard artist: planning shots")
         artist = StoryboardArtist(self.llm, trace, warnings)
-        sb = artist.run(script, characters, plan, max_shots)
+        sb = artist.run(script, characters, plan, max_shots, camera)
         shots = sb["shots"]
         selector = ReferenceSelector(self.llm, trace, warnings)
         checker = ConsistencyChecker(self.llm, trace, warnings)
@@ -749,7 +822,8 @@ class ViMaxOrchestrator:
             warnings.append(f"{len(remaining)} consistency note(s) remain; see 'issues'.")
         sb["total_duration"] = shots[-1]["end"] if shots else 0.0
         self._p(1.0, "Done")
-        return {"mode": mode, "plan": plan, "script": script, "characters": characters,
+        plan["episode"], plan["episodes"] = int(episode), int(episodes or 1)
+        return {"mode": mode, "camera": camera, "plan": plan, "script": script, "characters": characters,
                 "storyboard": {"shots": shots, "scenes": sb["scenes"], "total_duration": sb["total_duration"]},
                 "graph": graph.to_dict(), "render_plan": dg.render_plan(graph), "issues": report["issues"],
                 "rounds": rounds, "novel": sw["novel"],
@@ -872,13 +946,39 @@ def _last_frame(video: str, out_png: str) -> str:
     return out_png
 
 
+CORNERS = ("Bottom-Left", "Bottom-Right", "Top-Left", "Top-Right")
+
+
+def _character_scale(shot: dict) -> float:
+    """Closer framing -> a bigger character portrait; wide framing -> a smaller one."""
+    t = (shot.get("shot_type") or "").casefold()
+    if "close" in t:
+        return 0.40
+    if "wide" in t or "establishing" in t:
+        return 0.26
+    return 0.30
+
+
+def make_host_portrait(style: str, path: str) -> str:
+    """The narrator / podcast host shown in a corner when the user gives no picture of their own."""
+    host = {"name": "Host", "short": "Host", "gender": "unknown", "age": None, "traits": []}
+    anchor = na.visual_anchor(host)
+    return make_portrait({"name": "HOST", "style": style, "anchor": {k: anchor[k] for k in ("hair", "eyes", "skin", "outfit", "seed")}}, path)
+
+
 def render_storyboard(result: dict, output_path: str, work_dir: Optional[str] = None, size: Tuple[int, int] = (540, 960),
                       fps: int = 20, voice: bool = False, voice_name: str = "en-US-AriaNeural", max_shots: Optional[int] = None,
                       ffmpeg_path: Optional[str] = None, progress: Optional[Callable[[float, str], None]] = None,
-                      drift_threshold: float = 0.35) -> dict:
+                      drift_threshold: float = 0.35, use_portraits: bool = True, continuity: bool = True,
+                      host: Optional[dict] = None) -> dict:
     """Render the storyboard on the CPU: per-shot clips (scene-seeded backdrop, character portraits, subtitles,
     optional TTS voice), the last frame of each shot handed to the next as its starting keyframe, then joined.
-    Returns {"output_path","duration","shots","drift","keyframes","warnings","voice_used"}."""
+    Consistency switches: `use_portraits` (each character's anchor portrait in every shot they appear in) and
+    `continuity` (each shot starts from the previous shot's last frame); `drift_threshold` is how different a
+    character may look from their portrait before the drift report flags it.
+    `host` = {"image": path or None, "style": "human|ai|anime", "position": preset, "xy": (x, y), "scale": 0.28} puts a
+    framed narrator / podcast-host portrait in a screen corner for the whole video.
+    Returns {"output_path","duration","shots","drift","keyframes","warnings","voice_used","host"}."""
     import cv2
     import subprocess
     import tempfile
@@ -912,7 +1012,22 @@ def render_storyboard(result: dict, output_path: str, work_dir: Optional[str] = 
         portrait[name] = make_portrait(c, str(work / f"portrait_{re.sub(r'[^A-Za-z0-9]+', '_', name)}.png"))
         store.put(f"ref:{name}", portrait[name])
         anchors_sig[name] = dg.appearance_signature(portrait[name])
-    side = {n: ("Bottom-Left" if i % 2 == 0 else "Bottom-Right") for i, n in enumerate(chars)}  # a character always sits on the same side
+    host_path, host_pos, host_xy, host_scale = None, None, None, 0.28
+    if host:
+        host_pos = ve.normalize_position_preset(host.get("position") or "Bottom-Right")
+        host_xy = tuple(host["xy"]) if host.get("xy") else None
+        host_scale = float(host.get("scale") or 0.28)
+        img = host.get("image")
+        if img and cv2.imread(str(img)) is not None:
+            host_path = str(img)
+        else:
+            if img:
+                warnings.append("The host picture could not be read; a drawn host portrait is used instead.")
+            host_path = make_host_portrait(host.get("style", "human"), str(work / "portrait_host.png"))
+    host_top = bool(host_path) and (host_pos.startswith("Top") or (host_pos == "Custom Coordinates" and host_xy and host_xy[1] < size[1] / 2))
+    caption_pos = "center" if host_top else "auto"  # "auto" would put the caption at the top, under the host's picture
+    free = [c for c in ("Bottom-Left", "Bottom-Right", "Top-Left", "Top-Right") if c != host_pos]  # characters keep clear of the host
+    side = {n: free[i % 2] for i, n in enumerate(chars)}  # a character always sits on the same side
 
     # 2. render in dependency order
     plan = {p["shot"]: p for p in result["render_plan"]}
@@ -949,20 +1064,23 @@ def render_storyboard(result: dict, output_path: str, work_dir: Optional[str] = 
             comp.add_audio(audio, role="voiceover")
         style = _backdrop_style(s)
         seed = zlib.crc32(str(s.get("location", "")).encode("utf-8")) % 10000  # same place -> same backdrop
-        cont = next((i for i in store.inputs_for(s["idx"])["available"] if i["role"] == "continuity"), None)
+        cont = next((i for i in store.inputs_for(s["idx"])["available"] if i["role"] == "continuity"), None) if continuity else None
+        motion = "none" if (s.get("camera_movement") or "").casefold().startswith("static") else "ken_burns"
         if cont:
             hold = min(0.9, dur * 0.45)
             comp.add_broll(cont["path"], 0.0, hold, motion="none")
-            comp.add_broll(None, hold * 0.5, None, style=style, motion="ken_burns", seed=seed)
+            comp.add_broll(None, hold * 0.5, None, style=style, motion=motion, seed=seed)
         else:
-            comp.add_broll(None, 0.0, None, style=style, motion="ken_burns", seed=seed)
-        visible = [c for c in s.get("characters", []) if c in portrait][:2]
+            comp.add_broll(None, 0.0, None, style=style, motion=motion, seed=seed)
+        visible = [c for c in s.get("characters", []) if c in portrait][:2] if use_portraits else []
         for c in visible:
-            comp.add_avatar(portrait[c], 0.0, dur, side[c], None, 0.30, animation="pop" if s["kind"] != "dialogue" else "none")
+            comp.add_avatar(portrait[c], 0.0, dur, side[c], None, _character_scale(s), animation="pop" if s["kind"] != "dialogue" else "none")
+        if host_path:
+            comp.add_avatar(host_path, 0.0, dur, host_pos, host_xy, host_scale, animation="none")
         if s["kind"] == "establishing" or (s["idx"] == 0):
             comp.add_text(f"{s['int_ext']}. {s['location']} - {s['time_of_day'] or 'DAY'}".strip(" -"), 0.0, min(dur, 2.4), "top", "fade")
         if s.get("line"):
-            comp.add_text(f"{s['speaker']}: {s['line']}", 0.0, dur, "auto", "none", font_px=max(16, int(size[0] * 0.04)))
+            comp.add_text(f"{s['speaker']}: {s['line']}", 0.0, dur, caption_pos, "none", font_px=max(16, int(size[0] * 0.04)))
         elif s.get("action") and s["kind"] != "establishing":
             comp.add_text(s["action"][:110], 0.0, dur, "center", "fade", font_px=max(15, int(size[0] * 0.034)))
         clip = str(work / f"shot_{s['idx']:03d}.mp4")
@@ -1001,4 +1119,5 @@ def render_storyboard(result: dict, output_path: str, work_dir: Optional[str] = 
     total = round(sum(clips[s["idx"]][1] for s in shots), 2)
     return {"output_path": str(out.resolve()), "duration": total, "shots": [{"idx": s["idx"], "clip": clips[s["idx"]][0],
             "seconds": clips[s["idx"]][1]} for s in shots], "drift": drift, "keyframes": dict(store.paths),
-            "portraits": portrait, "warnings": warnings, "voice_used": voice_used}
+            "portraits": portrait, "warnings": warnings, "voice_used": voice_used,
+            "host": None if not host_path else {"image": host_path, "position": host_pos, "scale": host_scale}}

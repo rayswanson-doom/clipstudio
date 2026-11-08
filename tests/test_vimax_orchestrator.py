@@ -295,6 +295,81 @@ class ProjectAndRenderTests(unittest.TestCase):
                                  "x.mp4")
 
 
+class CameraPreferenceTests(unittest.TestCase):
+    def shots(self, **cam):
+        return vo.ViMaxOrchestrator().run(SCRIPT, mode="script2video", camera=cam or None)["storyboard"]["shots"]
+
+    def test_auto_changes_nothing(self):
+        self.assertEqual(self.shots(), self.shots(size="auto", angle="auto", movement="auto"))
+
+    def test_preferences_rewrite_every_text_field_consistently(self):
+        base = self.shots()
+        shots = self.shots(size="wide", angle="high", movement="handheld")
+        for b, s in zip(base, shots):
+            self.assertEqual(s["camera_angle"], "high angle")
+            self.assertEqual(s["camera_movement"], "handheld")
+            self.assertEqual(s["shot_type"], b["shot_type"] if b["kind"] == "establishing" else "wide shot")
+            self.assertEqual(s["variation_type"], "large")
+            for field in ("camera_prompt", "visual_desc"):
+                self.assertIn("high angle", s[field], field)
+                if b["camera_angle"] != "high angle":
+                    self.assertNotIn(b["camera_angle"], s[field].split(",")[1] if field == "camera_prompt" else s[field][:60])
+            self.assertEqual(s["duration"], b["duration"])  # framing never changes the timing
+            self.assertEqual(s["characters"], b["characters"])
+
+    def test_establishing_shots_stay_wide_and_bad_values_are_rejected(self):
+        est = [s for s in self.shots(size="close") if s["kind"] == "establishing"]
+        self.assertTrue(est and all("close" not in s["shot_type"] for s in est))
+        with self.assertRaises(ValueError):
+            vo.normalize_camera({"angle": "upside down"})
+
+    def test_close_ups_get_bigger_portraits_than_wide_shots(self):
+        close = vo._character_scale({"shot_type": "close-up"})
+        wide = vo._character_scale({"shot_type": "wide shot"})
+        self.assertGreater(close, vo._character_scale({"shot_type": "medium shot"}))
+        self.assertGreater(vo._character_scale({"shot_type": "medium shot"}), wide)
+
+
+class RenderOptionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.r = vo.ViMaxOrchestrator().run(SCRIPT, mode="script2video")
+
+    def render(self, **kw):
+        d = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, d, True)
+        return vo.render_storyboard(self.r, os.path.join(d, "o.mp4"), work_dir=os.path.join(d, "w"), size=(180, 320), fps=6, max_shots=3, **kw)
+
+    def test_host_overlay_goes_where_asked_and_characters_keep_clear(self):
+        out = self.render(host={"style": "ai", "position": "Bottom-Right", "scale": 0.25})
+        self.assertEqual(out["host"]["position"], "Bottom-Right")
+        self.assertTrue(os.path.isfile(out["host"]["image"]))
+
+    def test_unreadable_host_picture_falls_back_with_a_warning(self):
+        d = tempfile.mkdtemp()
+        bad = os.path.join(d, "x.png")
+        with open(bad, "wb") as f:
+            f.write(b"not an image")
+        out = self.render(host={"image": bad, "position": "Top-Left"})
+        self.assertTrue(any("host picture" in w for w in out["warnings"]))
+        self.assertTrue(out["host"]["image"].endswith("portrait_host.png"))
+
+    def test_custom_host_coordinates(self):
+        out = self.render(host={"position": "Custom Coordinates", "xy": (20, 40), "scale": 0.3})
+        self.assertEqual(out["host"]["position"], "Custom Coordinates")
+
+    def test_no_portraits_means_no_drift_report_and_no_continuity_keyframe_use(self):
+        out = self.render(use_portraits=False, continuity=False)
+        self.assertEqual(out["drift"], [])
+        self.assertTrue(os.path.getsize(out["output_path"]) > 1000)
+
+    def test_stricter_threshold_flags_more(self):
+        lax = self.render(drift_threshold=0.9)["drift"]
+        strict = self.render(drift_threshold=0.0)["drift"]
+        self.assertTrue(all(d["status"] == "ok" for d in lax))
+        self.assertTrue(any(d["status"] != "ok" for d in strict))
+
+
 class LazyLoadingTests(unittest.TestCase):
     def test_import_loads_no_heavy_modules(self):
         code = ("import sys; sys.path.insert(0, '.');"
