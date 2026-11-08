@@ -245,7 +245,7 @@ class LayoutTests(unittest.TestCase):
     def test_meme_reaction_controls(self):
         for mode in ("Clip Repurposer", "classic", None):
             page = self.open(mode=mode) if mode else self.open()
-            page.get_by_text("Contextual meme reactions", exact=True).click()
+            page.get_by_text("Contextual meme reactions").first.click()
             box = page.get_by_text("Enable Contextual Meme Reactions")
             box.wait_for(state="visible", timeout=10000)
             page.get_by_text("Reaction clip library").wait_for(state="visible", timeout=10000)
