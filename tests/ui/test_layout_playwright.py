@@ -91,9 +91,19 @@ class LayoutTests(unittest.TestCase):
     CLASSIC = "Narrated video with a 3D avatar (classic)"
 
     def choose(self, page, label, option):
-        """Pick an option of a Streamlit selectbox the way a user does."""
-        page.get_by_label(label, exact=True).click()
-        page.get_by_role("option", name=option, exact=True).click()
+        """Pick an option of a Streamlit selectbox the way a user does: open it and click the option; when the
+        popover does not open (it can close while the page is still scrolling), type the option into the
+        searchable select and press Enter, which is what a keyboard user would do."""
+        box = page.get_by_label(label, exact=True)
+        box.scroll_into_view_if_needed()
+        box.click()
+        try:
+            page.get_by_role("option", name=option, exact=True).click(timeout=6000)
+        except Exception:
+            box.click()
+            page.keyboard.type(option)
+            page.get_by_role("option", name=option, exact=True).first.wait_for(state="visible", timeout=8000)
+            page.keyboard.press("Enter")
 
     def open(self, width=1280, height=800, demo=False, mode=None):
         """mode: None (the default, Idea2Video), a creation-mode name, or "classic" (Idea2Video > narrated generator)."""
