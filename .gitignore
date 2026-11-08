@@ -11,3 +11,6 @@ downloads/
 __pycache__/
 *.pyc
 models/faster-whisper-base/
+
+# user reaction clips / index are local data
+storage/
