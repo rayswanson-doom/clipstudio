@@ -14,7 +14,7 @@ class LazyLoadingTests(unittest.TestCase):
             "import sys; sys.path.insert(0, 'backend')\n"
             "import pipeline, transcriber, video_engine, avatar_sync, ocr_engine, visual_cues, scorer, tts_engine\n"
             "import avatar_3d_engine, glb_model, soft_raster, lipsync_en, avatar_gestures, demo_avatars, render_engine\n"
-            "import vimax_orchestrator, novel_adapter, script_parser, dependency_graph, meme_matcher\n"
+            "import vimax_orchestrator, novel_adapter, script_parser, dependency_graph, meme_matcher, asset_manager\n"
             f"bad = [m for m in {HEAVY!r} if m in sys.modules]\n"
             "print('LOADED:' + ','.join(bad))\n"
         )

@@ -39,10 +39,12 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 try:  # package import (backend.vimax_orchestrator) or plain module (vimax_orchestrator)
+    from . import asset_manager as am
     from . import dependency_graph as dg
     from . import novel_adapter as na
     from . import script_parser as sp
 except ImportError:  # pragma: no cover
+    import asset_manager as am
     import dependency_graph as dg
     import novel_adapter as na
     import script_parser as sp
@@ -821,9 +823,16 @@ class ViMaxOrchestrator:
         if remaining:
             warnings.append(f"{len(remaining)} consistency note(s) remain; see 'issues'.")
         sb["total_duration"] = shots[-1]["end"] if shots else 0.0
-        self._p(1.0, "Done")
         plan["episode"], plan["episodes"] = int(episode), int(episodes or 1)
+        # ---- Pre-Production Asset Gate: the run stops here. Nothing is rendered until every character and every
+        # location has a reference picture (uploaded or generated): see open_asset_gate / close_asset_gate.
+        cards = am.build_cards({"storyboard": {"shots": shots}, "plan": plan, "characters": characters})
+        gate = {"open": True, "status": "awaiting_assets",
+                "required": [c["id"] for c in cards["characters"] + cards["locations"]],
+                "message": "Provide or generate a reference picture for every character and location, then render."}
+        self._p(1.0, "Waiting at the asset gate")
         return {"mode": mode, "camera": camera, "plan": plan, "script": script, "characters": characters,
+                "asset_cards": cards, "asset_gate": gate,
                 "storyboard": {"shots": shots, "scenes": sb["scenes"], "total_duration": sb["total_duration"]},
                 "graph": graph.to_dict(), "render_plan": dg.render_plan(graph), "issues": report["issues"],
                 "rounds": rounds, "novel": sw["novel"],
@@ -831,13 +840,40 @@ class ViMaxOrchestrator:
                 "trace": trace, "warnings": warnings, "seconds": round(time.time() - started, 2)}
 
 
+def open_asset_gate(result: dict, folder: str) -> "am.AssetBook":
+    """The book of prompt cards for this episode, kept in `folder` (assets.json). Pictures already attached - by an
+    earlier episode of the same project, or an earlier visit to the studio - are kept; new names / places are added."""
+    cards = result.get("asset_cards") or am.build_cards(result)
+    try:
+        book = am.AssetBook.load(folder)
+        book.merge_cards(cards)
+    except (FileNotFoundError, ValueError, KeyError):
+        book = am.AssetBook(folder, cards)
+    book.save()
+    return book
+
+
+def close_asset_gate(result: dict, book: "am.AssetBook") -> dict:
+    """Open the gate for rendering: every card of THIS episode must have its picture. Raises AssetGateError otherwise."""
+    wanted = [c["id"] for c in (result.get("asset_cards") or am.build_cards(result))["characters"]
+              + (result.get("asset_cards") or am.build_cards(result))["locations"]]
+    miss = [cid for cid in wanted if cid in book.missing() or cid not in book.cards]
+    if miss:
+        raise am.AssetGateError(miss)
+    result["asset_gate"] = {"open": False, "status": "assets_locked", "required": wanted,
+                            "locked": {cid: book.cards[cid]["image"] for cid in wanted}}
+    book.save()
+    return result["asset_gate"]
+
+
 def save_project(result: dict, folder: str) -> List[str]:
     """Write the plan as files: project.json, script.fountain, storyboard.json, characters.json, graph.json, graph.mmd, subtitles.srt."""
     out = Path(folder)
     out.mkdir(parents=True, exist_ok=True)
-    files = {"project.json": json.dumps({k: v for k, v in result.items() if k not in ("graph", "render_plan")}, indent=2, ensure_ascii=False),
+    files = {"project.json": json.dumps({k: v for k, v in result.items() if k not in ("graph", "render_plan", "asset_cards")}, indent=2, ensure_ascii=False),
              "script.fountain": result["script"],
              "storyboard.json": json.dumps(result["storyboard"], indent=2, ensure_ascii=False),
+             "asset_cards.json": json.dumps(result.get("asset_cards") or am.build_cards(result), indent=2, ensure_ascii=False),
              "characters.json": json.dumps(result["characters"], indent=2, ensure_ascii=False),
              "graph.json": json.dumps(result["graph"], indent=2, ensure_ascii=False),
              "graph.mmd": dg.DependencyGraph.from_dict(result["graph"]).to_mermaid(),
@@ -966,12 +1002,241 @@ def make_host_portrait(style: str, path: str) -> str:
     return make_portrait({"name": "HOST", "style": style, "anchor": {k: anchor[k] for k in ("hair", "eyes", "skin", "outfit", "seed")}}, path)
 
 
+# --------------------------------------------------------------------------- #
+# scenic renderer: scenery plate + cut-out characters + camera moves + kinetic captions
+# --------------------------------------------------------------------------- #
+_SHOT_FRAMING = {"close": (0.86, 1.07), "medium": (0.66, 1.0), "wide": (0.50, 0.96)}  # (character height, foot line)
+
+
+def _framing(shot: dict) -> Tuple[float, float]:
+    t = f"{shot.get('shot_type') or ''}".casefold()
+    return _SHOT_FRAMING["close"] if "close" in t else (_SHOT_FRAMING["wide"] if ("wide" in t or "establishing" in t) else _SHOT_FRAMING["medium"])
+
+
+def _scene_slots(shots: List[dict], x_range: Tuple[float, float]) -> Dict[int, Dict[str, float]]:
+    """scene index -> {character: x}. A character keeps the same spot for a whole scene (in order of first appearance),
+    spread evenly across `x_range`, so people do not jump around between cuts."""
+    out: Dict[int, Dict[str, float]] = {}
+    for sh in shots:
+        names = out.setdefault(sh.get("scene_idx", 0), {})
+        for c in sh.get("characters", []):
+            names.setdefault(c, 0.0)
+    lo, hi = x_range
+    for names in out.values():
+        order = list(names)[:3]
+        n = len(order)
+        for i, c in enumerate(order):
+            names[c] = (lo + hi) / 2 if n == 1 else lo + (hi - lo) * (0.12 + 0.76 * i / (n - 1))
+        for c in list(names)[3:]:
+            names[c] = (lo + hi) / 2  # more than three at once: the extras stay behind the middle one
+    return out
+
+
+def _actor_drift(clip: str, comp, cutout_path: str, name: str, t: float) -> Optional[float]:
+    """How different the character looks in the RENDERED frame from its reference cut-out (0 = identical): mean colour
+    of the cut-out's opaque pixels vs the same pixels in the frame at time t. Catches a wrong file, a caption or meme
+    covering the character, or a broken blend. None when the figure is (almost) out of frame."""
+    import cv2
+    import numpy as np
+
+    pos = dict(comp.actor_positions(t)).get(name)
+    cap = cv2.VideoCapture(clip)
+    try:
+        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+        ok, frame = cap.read()
+    finally:
+        cap.release()
+    if not ok or pos is None:
+        return None
+    x, y, w, h = pos
+    spr = cv2.imread(cutout_path, cv2.IMREAD_UNCHANGED)
+    spr = cv2.resize(spr, (w, h), interpolation=cv2.INTER_AREA)
+    mask = cv2.erode((spr[..., 3] > 235).astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
+    H, W = frame.shape[:2]
+    x0, y0, x1, y1 = max(0, x), max(0, y), min(W, x + w), min(H, y + h)
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return None
+    m = mask[y0 - y:y1 - y, x0 - x:x1 - x]
+    if m.sum() < 200:
+        return None
+    ref = spr[y0 - y:y1 - y, x0 - x:x1 - x, :3][m].astype(np.float32).mean(axis=0)
+    got = frame[y0:y1, x0:x1][m].astype(np.float32).mean(axis=0)
+    return float(np.abs(ref - got).mean() / 255.0)
+
+
+def _render_scenic(result: dict, output_path: str, assets, work_dir: Optional[str], size, fps, voice, voice_name, max_shots,
+                   ffmpeg_path, progress, host, drift_threshold: float = 0.35) -> dict:
+    """Every shot is composed from the locked reference pictures: scenery plate (camera move) -> cut-out characters
+    (entry / exit slides, talking bob) -> kinetic captions synchronised to the voice -> optional host corner."""
+    import cv2
+    import tempfile
+
+    try:
+        from . import render_engine as re_
+        from . import video_engine as ve
+    except ImportError:  # pragma: no cover
+        import render_engine as re_
+        import video_engine as ve
+
+    am.require_ready(assets)  # the gate
+    shots = list(result["storyboard"]["shots"])[: max_shots or None]
+    if not shots:
+        raise ValueError("The storyboard has no shots.")
+    ff = ve.find_ffmpeg(ffmpeg_path)
+    graph = dg.DependencyGraph.from_dict(result["graph"])
+    store = dg.KeyframeStore(graph)
+    bound = dg.bind_assets(graph, store, assets.character_images(), assets.location_images())
+    dg.enforce_locks(graph, store, shots)  # every shot must have its character + location reference
+    warnings: List[str] = []
+    if bound["unknown"]:
+        warnings.append("Pictures for " + ", ".join(bound["unknown"][:4]) + " are not used by this episode.")
+    work = Path(work_dir or tempfile.mkdtemp(prefix="story_"))
+    work.mkdir(parents=True, exist_ok=True)
+
+    def say(f, m):
+        if progress:
+            progress(f, m)
+
+    say(0.02, "Cutting out the characters")
+    cutout: Dict[str, str] = {}
+    for c in assets.characters:
+        if c["name"] in {n for sh in shots for n in sh.get("characters", [])}:
+            try:
+                cutout[c["name"]] = am.ensure_cutout(c, assets)
+                if c.get("cutout_method") == "whole-picture":
+                    warnings.append(f"{c['name']}: the background could not be removed, so the whole picture is shown. Use a "
+                                    "transparent PNG or a picture on a plain background for a clean cut-out.")
+            except am.AssetError as exc:
+                raise ValueError(f"The picture for {c['name']} cannot be used: {exc}") from None
+    host_path, host_pos, host_xy, host_scale = None, None, None, 0.28
+    if host:
+        host_pos = ve.normalize_position_preset(host.get("position") or "Bottom-Right")
+        host_xy = tuple(host["xy"]) if host.get("xy") else None
+        host_scale = float(host.get("scale") or 0.28)
+        img = host.get("image")
+        if img and cv2.imread(str(img)) is not None:
+            host_path = str(img)
+        else:
+            if img:
+                warnings.append("The host picture could not be read; a drawn host portrait is used instead.")
+            host_path = make_host_portrait(host.get("style", "human"), str(work / "portrait_host.png"))
+    host_top = bool(host_path) and (host_pos.startswith("Top") or (host_pos == "Custom Coordinates" and host_xy and host_xy[1] < size[1] / 2))
+    host_left = bool(host_path) and (host_pos.endswith("Left") or (host_pos == "Custom Coordinates" and host_xy and host_xy[0] < size[0] / 2))
+    host_right = bool(host_path) and (host_pos.endswith("Right") or (host_pos == "Custom Coordinates" and host_xy and host_xy[0] >= size[0] / 2))
+    x_range = (0.34, 0.96) if host_left and not host_top else ((0.04, 0.66) if host_right and not host_top else (0.0, 1.0))
+    caption_pos = "top" if (host_path and not host_top) else "bottom"
+    slots = _scene_slots(shots, x_range)
+    # first / last shot of each character's stay in a scene -> entry / exit
+    stay: Dict[Tuple[int, str], List[int]] = {}
+    for sh in shots:
+        for c in sh.get("characters", []):
+            stay.setdefault((sh.get("scene_idx", 0), c), []).append(sh["idx"])
+    scene_last = {}
+    for sh in shots:
+        scene_last[sh.get("scene_idx", 0)] = sh["idx"]
+    scene_first = {}
+    for sh in shots:
+        scene_first.setdefault(sh.get("scene_idx", 0), sh["idx"])
+    tts = None
+    if voice:
+        try:
+            try:
+                from . import tts_engine as tts
+            except ImportError:  # pragma: no cover
+                import tts_engine as tts
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"Voice is unavailable ({exc}); rendering silent shots.")
+            tts = None
+    clips: Dict[int, Tuple[str, float]] = {}
+    conditioning: List[dict] = []
+    observed: List[dict] = []
+    voice_used = False
+    for n, s in enumerate(shots):
+        say(0.06 + 0.84 * n / len(shots), f"Rendering shot {s['idx'] + 1} of {len(shots)}")
+        dur = float(s["duration"])
+        audio = None
+        if tts and s.get("line"):
+            try:
+                audio = str(work / f"voice_{s['idx']}.mp3")
+                tts.generate_voiceover_sync(s["line"], audio, voice=voice_name)
+                length = float(ve._probe_media(ff, audio).get("duration") or 0)
+                if length > dur - 0.2:
+                    dur = round(length + 0.25, 2)  # the shot lasts as long as the voice: motion, captions and audio stay in sync
+                voice_used = True
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"Voice for shot {s['idx']} failed ({str(exc)[:80]}); that shot is silent.")
+                audio = None
+        man = dg.reference_manifest(graph, store, s["idx"])
+        comp = re_.Composition(size, fps, duration=dur, ffmpeg_path=ff)
+        if audio:
+            comp.add_audio(audio, role="voiceover")
+        scene = s.get("scene_idx", 0)
+        comp.add_scenery(man["location"], 0.0, None, re_.camera_for_shot(s, seed=s["idx"]),
+                         fade=0.35 if s["idx"] == scene_first.get(scene) else 0.0)
+        h_frac, foot = _framing(s)
+        vis = [c for c in s.get("characters", []) if c in cutout][:3]
+        if len(vis) > 1:
+            h_frac = min(h_frac * 0.92, 0.64)  # two people share the frame: step back so they do not overlap
+        speak_end = max(0.4, dur - 0.1)
+        for c in vis:
+            ref = man["characters"].get(c)
+            if not ref:
+                raise dg.GraphError(f"Shot {s['idx']} has no reference picture bound for {c}.")
+            x = slots[scene].get(c, 0.5)
+            ids = stay[(scene, c)]
+            entry = ("left" if x < 0.5 else "right") if s["idx"] == ids[0] and s["idx"] != scene_first.get(scene) else None
+            leaves = s["idx"] == ids[-1] and s["idx"] != scene_last.get(scene)
+            comp.add_actor(cutout[c], 0.0, None, x=x, x_to=x + (0.015 if x < 0.5 else -0.015), foot_y=foot, height=h_frac,
+                           entry=entry, exit=(("left" if x < 0.5 else "right") if leaves else None),
+                           speaking=([(0.05, speak_end)] if (s.get("speaker") == c and s.get("line")) else []), name=c)
+            conditioning.append({"shot": s["idx"], "character": c, "reference": ref, "reference_sha1": am.file_sha1(ref),
+                                 "cutout": cutout[c], "location": man["location"]})
+        if host_path:
+            comp.add_avatar(host_path, 0.0, dur, host_pos, host_xy, host_scale, animation="none")
+        if s["kind"] == "establishing" or s["idx"] == 0:
+            comp.add_text(f"{s['int_ext']}. {s['location']} - {s['time_of_day'] or 'DAY'}".strip(" -"), 0.0, min(dur, 2.4),
+                         "center" if host_top else "top", "fade")
+        if s.get("line"):
+            comp.add_kinetic_caption(f"{s['line']}", 0.05, max(0.4, dur - 0.05), caption_pos,
+                                     font_px=max(16, int(size[0] * 0.05)))
+        elif s.get("action") and s["kind"] != "establishing":
+            comp.add_text(s["action"][:110], 0.0, dur, "center" if not host_top else "bottom", "fade", font_px=max(15, int(size[0] * 0.034)))
+        clip = str(work / f"shot_{s['idx']:03d}.mp4")
+        res = comp.render(clip)
+        warnings.extend(w for w in res["warnings"] if w not in warnings and "More than one avatar" not in w)
+        kf = _last_frame(clip, str(work / f"kf_{s['idx']:03d}_last.png"))
+        store.put(f"kf:{s['idx']}:last", kf)
+        clips[s["idx"]] = (clip, dur)
+        t_mid = min(max(0.2, dur - 0.3), max(0.9, dur * 0.5))  # after the entry slide, before the exit
+        for c in vis:
+            dist = _actor_drift(clip, comp, cutout[c], c, t_mid)
+            if dist is not None:
+                observed.append({"shot": s["idx"], "character": c, "distance": round(dist, 4),
+                                 "status": "ok" if dist <= drift_threshold else "drift"})
+    say(0.92, "Joining the shots")
+    ve.join_clips([clips[s["idx"]][0] for s in shots], output_path, ffmpeg_path=ff)
+    say(1.0, "Done")
+    total = round(sum(clips[s["idx"]][1] for s in shots), 2)
+    return {"output_path": str(Path(output_path).resolve()), "duration": total, "scenic": True,
+            "shots": [{"idx": s["idx"], "clip": clips[s["idx"]][0], "seconds": clips[s["idx"]][1]} for s in shots],
+            "drift": sorted(observed, key=lambda r: -r["distance"]), "conditioning": conditioning, "locks": dg.lock_check(graph, store, shots),
+            "keyframes": dict(store.paths), "portraits": dict(cutout), "warnings": warnings, "voice_used": voice_used,
+            "host": None if not host_path else {"image": host_path, "position": host_pos, "scale": host_scale}}
+
+
 def render_storyboard(result: dict, output_path: str, work_dir: Optional[str] = None, size: Tuple[int, int] = (540, 960),
                       fps: int = 20, voice: bool = False, voice_name: str = "en-US-AriaNeural", max_shots: Optional[int] = None,
                       ffmpeg_path: Optional[str] = None, progress: Optional[Callable[[float, str], None]] = None,
                       drift_threshold: float = 0.35, use_portraits: bool = True, continuity: bool = True,
-                      host: Optional[dict] = None) -> dict:
-    """Render the storyboard on the CPU: per-shot clips (scene-seeded backdrop, character portraits, subtitles,
+                      host: Optional[dict] = None, assets=None) -> dict:
+    """Render the storyboard on the CPU.
+
+    With `assets` (an asset_manager.AssetBook whose cards all have pictures - the output of the Pre-Production Asset
+    Gate) the SCENIC renderer is used: each shot is composed from the location's background plate and the characters'
+    cut-outs, with camera moves, entry / exit slides and kinetic captions; a missing picture raises AssetGateError.
+    Without `assets` the older portrait-tile animatic below is rendered.
+
+    Portrait-tile animatic: per-shot clips (scene-seeded backdrop, character portraits, subtitles,
     optional TTS voice), the last frame of each shot handed to the next as its starting keyframe, then joined.
     Consistency switches: `use_portraits` (each character's anchor portrait in every shot they appear in) and
     `continuity` (each shot starts from the previous shot's last frame); `drift_threshold` is how different a
@@ -990,6 +1255,9 @@ def render_storyboard(result: dict, output_path: str, work_dir: Optional[str] = 
         import render_engine as re_
         import video_engine as ve
 
+    if assets is not None:
+        return _render_scenic(result, output_path, assets, work_dir, tuple(size), fps, voice, voice_name, max_shots,
+                              ffmpeg_path, progress, host, drift_threshold)
     shots = list(result["storyboard"]["shots"])[: max_shots or None]
     if not shots:
         raise ValueError("The storyboard has no shots.")

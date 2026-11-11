@@ -60,7 +60,7 @@ class RealCheckTests(unittest.TestCase):
 class RunnerTests(unittest.TestCase):
     def patched(self, **overrides):
         names = ["check_imports", "check_ffmpeg", "check_scorer", "check_face_model",
-                 "check_whisper", "check_clip_pipeline", "check_avatar", "check_avatar_3d", "check_render_engine", "check_story", "check_memes", "check_ocr", "check_cues", "check_tts_online"]
+                 "check_whisper", "check_clip_pipeline", "check_avatar", "check_avatar_3d", "check_render_engine", "check_story", "check_memes", "check_episode_studio", "check_ocr", "check_cues", "check_tts_online"]
         stack = [mock.patch.object(selftest, n, return_value="fine") for n in names]
         stack.append(mock.patch.object(selftest, "check_app_page", return_value="fine"))
         return stack
@@ -76,7 +76,7 @@ class RunnerTests(unittest.TestCase):
     def test_all_ok(self):
         results = self.run_with()
         self.assertEqual({r[1] for r in results}, {"ok"})
-        self.assertEqual(len(results), 15)
+        self.assertEqual(len(results), 16)
 
     def test_hard_failure_is_reported(self):
         results = dict((r[0], r[1]) for r in self.run_with("check_face_model"))

@@ -23,7 +23,7 @@ import re
 from collections import defaultdict, deque
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-NODE_KINDS = ("character", "reference", "scene", "shot", "keyframe")
+NODE_KINDS = ("character", "reference", "scene", "shot", "keyframe", "location")
 EDGE_KINDS = ("anchors", "references", "located_in", "produces", "continues", "feeds")
 MAX_REFERENCES = 8  # ViMax selects at most 8 reference images per frame
 
@@ -156,6 +156,10 @@ def _key(name: str) -> str:
     return re.sub(r"\s+", " ", str(name)).strip()
 
 
+def _loc_key(name) -> str:
+    return re.sub(r"\s+", " ", str(name or "")).strip().casefold()
+
+
 def portrait_view_for(shot: dict, character: str) -> str:
     """front / side / back portrait best matching how the camera sees the character (ViMax reference selection)."""
     text = f"{shot.get('camera_angle', '')} {shot.get('shot_type', '')} {shot.get('visual_desc', '')}".casefold()
@@ -213,6 +217,13 @@ def build_from_storyboard(shots: Sequence[dict], characters: Sequence[dict],
                 refs.append((f"kf:{j}:last", "references", {"role": "recent", "character": c}))
         for src, kind, attrs in refs[:max_references]:
             g.add_edge(src, sid, kind, **attrs)
+        loc = _loc_key(sh.get("location"))
+        if loc:  # the place's background plate: every shot in that place is conditioned on the SAME picture
+            if f"loc:{loc}" not in g.nodes:
+                g.add_node(f"loc:{loc}", "location", label=str(sh.get("location")).title())
+                g.add_node(f"locref:{loc}", "reference", label=f"{str(sh.get('location')).title()} background", location=loc)
+                g.add_edge(f"loc:{loc}", f"locref:{loc}", "anchors")
+            g.add_edge(f"locref:{loc}", sid, "references", role="location", location=loc)  # not counted in max_references
         g.nodes[sid]["continues_from"] = prev["idx"] if continues else None
         for c in chars:
             last_seen[c] = i
@@ -229,7 +240,8 @@ def render_plan(graph: DependencyGraph) -> List[dict]:
         if graph.nodes[n]["kind"] != "shot":
             continue
         inputs = [{"node": e["src"], "kind": e["kind"], "role": e.get("role"), "character": e.get("character"),
-                   "view": e.get("view")} for e in graph.in_edges(n) if e["kind"] in ("references", "continues")]
+                   "view": e.get("view"), "location": e.get("location")}
+                  for e in graph.in_edges(n) if e["kind"] in ("references", "continues")]
         out.append({"shot": int(n.split(":")[1]), "level": depth[n], "inputs": inputs,
                     "continues_from": graph.nodes[n].get("continues_from")})
     return out
@@ -262,7 +274,7 @@ class KeyframeStore:
             p = self.paths.get(e["src"])
             if p:
                 avail.append({"node": e["src"], "path": p, "role": e.get("role"), "character": e.get("character"),
-                              "view": e.get("view")})
+                              "view": e.get("view"), "location": e.get("location")})
             else:
                 missing.append(e["src"])
         return {"available": avail, "missing": missing}
@@ -270,6 +282,65 @@ class KeyframeStore:
     def ready(self, shot_idx: int) -> bool:
         """True when every upstream keyframe the shot depends on has been produced (anchors may be absent)."""
         return not [m for m in self.inputs_for(shot_idx)["missing"] if m.startswith("kf:")]
+
+
+# --------------------------------------------------------------------------- #
+# reference locking: the user's / generated pictures bound to the graph
+# --------------------------------------------------------------------------- #
+def bind_assets(graph: DependencyGraph, store: KeyframeStore, character_images: Dict[str, str],
+                location_images: Dict[str, str]) -> dict:
+    """Attach the reference pictures (full-length character, location background) to their anchor nodes.
+    Returns {"bound": [node ids], "unknown": [names / places the graph does not contain]}."""
+    bound, unknown = [], []
+    for name, path in character_images.items():
+        node = f"ref:{_key(name)}"
+        if node in graph.nodes:
+            store.put(node, path)
+            bound.append(node)
+        else:
+            unknown.append(name)
+    for loc, path in location_images.items():
+        node = f"locref:{_loc_key(loc)}"
+        if node in graph.nodes:
+            store.put(node, path)
+            bound.append(node)
+        else:
+            unknown.append(loc)
+    return {"bound": bound, "unknown": unknown}
+
+
+def lock_check(graph: DependencyGraph, store: KeyframeStore, shots: Sequence[dict]) -> List[dict]:
+    """Shots whose character / location reference pictures are not bound yet: [{"shot", "missing": [node ids]}]."""
+    out = []
+    for sh in shots:
+        sid = f"shot:{sh['idx']}"
+        if sid not in graph.nodes:
+            out.append({"shot": sh["idx"], "missing": ["(shot not in the graph)"]})
+            continue
+        need = [e["src"] for e in graph.in_edges(sid) if e["kind"] == "references"
+                and e.get("role") in ("anchor", "location")]
+        miss = [n for n in need if n not in store.paths]
+        if miss:
+            out.append({"shot": sh["idx"], "missing": miss})
+    return out
+
+
+def enforce_locks(graph: DependencyGraph, store: KeyframeStore, shots: Sequence[dict]) -> None:
+    """Refuse to render while any shot lacks its character / location reference (prevents appearance drift by design)."""
+    bad = lock_check(graph, store, shots)
+    if bad:
+        raise GraphError("Reference pictures missing for " + "; ".join(
+            f"shot {b['shot']}: {', '.join(b['missing'])}" for b in bad[:4]) + (" ..." if len(bad) > 4 else ""))
+
+
+def reference_manifest(graph: DependencyGraph, store: KeyframeStore, shot_idx: int) -> dict:
+    """Exactly which pictures condition one shot: {"characters": {name: path}, "location": path | None,
+    "continuity": path | None}. The renderer draws only from this, so the same file is used in every shot."""
+    inputs = store.inputs_for(shot_idx)["available"]
+    chars = {i["character"]: i["path"] for i in inputs if i["role"] == "anchor"}
+    loc = next((i["path"] for i in inputs if i["role"] == "location"), None)
+    cont = next((i["path"] for i in inputs if i["role"] == "continuity"), None)
+    return {"characters": chars, "location": loc, "continuity": cont}
 
 
 def appearance_signature(image, region: Optional[Tuple[int, int, int, int]] = None):

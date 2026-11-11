@@ -27,6 +27,7 @@ try:  # package import (backend.pipeline) or plain module (pipeline)
     from .avatar_sync import create_avatar_video, load_avatar
     from . import avatar_3d_engine
     from . import demo_avatars
+    from . import asset_manager
     from . import meme_matcher
     from . import ocr_engine
     from . import render_engine
@@ -42,6 +43,7 @@ except ImportError:  # pragma: no cover
     from avatar_sync import create_avatar_video, load_avatar
     import avatar_3d_engine
     import demo_avatars
+    import asset_manager
     import meme_matcher
     import ocr_engine
     import render_engine
@@ -618,6 +620,10 @@ def run_story_pipeline(
     host_avatar: Optional[dict] = None,
     transport=None,
     memes: Optional[dict] = None,
+    plan_result: Optional[dict] = None,
+    asset_book=None,
+    asset_backend: str = "draw",
+    image_transport=None,
 ) -> dict:
     """Idea / screenplay / novel -> multi-shot storyboard (+ CPU animatic) -> Google Drive, on any computer (no GPU).
 
@@ -630,6 +636,14 @@ def run_story_pipeline(
     `camera` = {"size","angle","movement"} preferences; `use_portraits` / `continuity` / `drift_threshold` are the
     character-consistency switches; `host_avatar` puts a podcast-style narrator portrait in a screen corner
     ({"image","style","position","xy","scale"}).
+
+    PRE-PRODUCTION ASSET GATE. Planning stops at a gate: `render=False` returns the plan, the prompt cards
+    (result["asset_cards"]) and an asset book folder (result["assets_dir"]) for the Asset Studio, where each character
+    and location gets a picture (uploaded or generated). Rendering with `plan_result` (that plan) and `asset_book`
+    (the filled-in asset_manager.AssetBook) draws every shot from those locked pictures. If a render is requested
+    without any pictures, the missing ones are generated with `asset_backend` ("draw" = offline painter, "auto" =
+    free online generator -> local diffusers -> painter) and a warning says so. Character sheets, location pictures and
+    assets.json are backed up to Google Drive together with the episode.
 
     Every finished render is backed up: each episode's video and a zip of its project files are uploaded to the Drive
     folder as soon as that episode is done (a missing folder / sign-in or an upload failure becomes a warning; the
@@ -660,6 +674,7 @@ def run_story_pipeline(
     total = max(1, int(episodes or 1)) if all_episodes else 1
     e = int(episode) if not all_episodes else 1
     done = 0
+    synced_assets: set = set()
     while True:
         label = f"Episode {e}: " if total > 1 else ""
         base, span = done / total, 1.0 / total
@@ -667,25 +682,61 @@ def run_story_pipeline(
         def prog(stage, f, _b=base, _s=span, _l=label):
             _emit(progress, _l + stage, _b + _s * f)
 
-        _emit(progress, label + "Planning the story", base + span * 0.02)
-        result = vo.ViMaxOrchestrator(llm, progress=lambda f, m: prog(m, 0.02 + 0.38 * f)).run(
-            source, mode=mode, style=style, target_seconds=target_seconds, episode=e,
-            episodes=(total if (all_episodes and mode == "idea2video") else episodes), max_shots=max_shots, camera=camera)
+        if plan_result is not None and done == 0:  # the plan the user reviewed in the wizard (Step 1)
+            result = plan_result
+        else:
+            _emit(progress, label + "Planning the story", base + span * 0.02)
+            result = vo.ViMaxOrchestrator(llm, progress=lambda f, m: prog(m, 0.02 + 0.38 * f)).run(
+                source, mode=mode, style=style, target_seconds=target_seconds, episode=e,
+                episodes=(total if (all_episodes and mode == "idea2video") else episodes), max_shots=max_shots, camera=camera)
         if all_episodes and mode == "novel2video" and done == 0:
             total = max(1, int((result.get("novel") or {}).get("episodes") or 1))
             base, span = 0.0, 1.0 / total
         ep_warn = [w for w in result["warnings"]]
-        name = f"story_{_safe_name(result['plan'].get('title') or 'story', 30)}_{stamp}" + (f"_e{e}" if total > 1 else "")
-        project_dir = out_dir / name
+        if result.get("project_dir") and plan_result is not None and done == 0:
+            project_dir = Path(result["project_dir"])
+            name = project_dir.name
+        else:
+            name = f"story_{_safe_name(result['plan'].get('title') or 'story', 30)}_{stamp}" + (f"_e{e}" if total > 1 else "")
+            project_dir = out_dir / name
         vo.save_project(result, str(project_dir))
-        video_path, drift = None, []
+        assets_dir = Path(result["assets_dir"]) if result.get("assets_dir") else (
+            Path(asset_book.folder) if asset_book is not None else out_dir / f"{name}_assets")
+        book = asset_book
+        if book is None:
+            book = vo.open_asset_gate(result, str(assets_dir))
+        else:
+            book.merge_cards(result.get("asset_cards") or {"characters": [], "locations": []})
+            book.save()
+        result["assets_dir"] = str(assets_dir)
+        video_path, drift, rr = None, [], {}
         if render:
-            prog("Rendering the animatic (CPU)", 0.42)
+            try:
+                if book.missing():  # the user did not fill the gate: make the missing pictures now
+                    prog("Creating the character and location pictures", 0.41)
+                    wanted = {c["id"] for c in (result.get("asset_cards") or {}).get("characters", []) + (result.get("asset_cards") or {}).get("locations", [])}
+                    todo = [c for c in book.missing() if c in wanted]
+                    gen = asset_manager.generate_images(book, todo, backend=asset_backend, frame_size=tuple(size), transport=image_transport)
+                    ep_warn.append(f"{len(todo)} reference picture(s) were not supplied, so they were generated automatically ({asset_backend}).")
+                    ep_warn.extend(w for w in gen["warnings"] if w not in ep_warn)
+                    for cid, why in gen["failed"].items():
+                        ep_warn.append(f"No picture could be made for {cid}: {why}")
+                    book.save()
+                vo.close_asset_gate(result, book)
+            except asset_manager.AssetGateError as exc:
+                ep_warn.append(str(exc))
+                render_ok = False
+            else:
+                render_ok = True
+        else:
+            render_ok = False
+        if render and render_ok:
+            prog("Rendering the episode (CPU)", 0.42)
             try:
                 rr = vo.render_storyboard(
                     result, str(out_dir / f"{name}.mp4"), work_dir=str(project_dir / "work"), size=tuple(size), fps=fps,
                     voice=voice, voice_name=voice_name, ffmpeg_path=ffmpeg_path, drift_threshold=drift_threshold,
-                    use_portraits=use_portraits, continuity=continuity, host=host_avatar,
+                    use_portraits=use_portraits, continuity=continuity, host=host_avatar, assets=book,
                     progress=lambda f, m: prog(m, 0.42 + 0.46 * f))
                 video_path, drift = rr["output_path"], rr["drift"]
                 ep_warn.extend(w for w in rr["warnings"] if w not in ep_warn)
@@ -712,6 +763,7 @@ def run_story_pipeline(
                                         ep_warn, lambda st, f: prog(st, 0.88 + 0.03 * f), "Adding meme reactions",
                                         llm=llm, clamp=True)
         drive_link = project_link = None
+        asset_links: dict = {}
         if video_path:  # every finished render is backed up, together with its project files
             if not folder_checked:
                 folder, folder_checked = _usable_folder(folder_id, ep_warn), True
@@ -722,7 +774,13 @@ def run_story_pipeline(
                 except Exception as exc:  # noqa: BLE001
                     archive = None
                     ep_warn.append(f"The project files could not be zipped for backup ({exc}).")
-                sent = _uploader_mod.backup_files([p for p in (video_path, archive) if p], folder, upload_fn=upload_to_google_drive)
+                book.save()
+                asset_files = [p for p in _uploader_mod.collect_asset_files(book) if p not in synced_assets]
+                sent = _uploader_mod.backup_files([p for p in (video_path, archive, *asset_files) if p], folder, upload_fn=upload_to_google_drive)
+                for p in asset_files:
+                    if p in sent["links"]:
+                        synced_assets.add(p)
+                        asset_links[p] = sent["links"][p]
                 drive_link = sent["links"].get(video_path)
                 project_link = sent["links"].get(archive) if archive else None
                 for path, msg in sent["errors"].items():
@@ -730,6 +788,8 @@ def run_story_pipeline(
                 if drive_link:
                     drive_links.append(drive_link)
         result.update({"project_dir": str(project_dir), "video_path": video_path, "drift": drift,
+                       "frame_size": list(size), "asset_links": asset_links, "conditioning": rr.get("conditioning", []),
+                       "assets": {"dir": str(assets_dir), **book.summary()},
                        "drive_link": drive_link, "project_link": project_link, "rendered": bool(video_path),
                        "memes": _meme_summary(meme_applied)})
         summaries.append({"episode": e, "title": result["plan"].get("title"), "video_path": video_path,

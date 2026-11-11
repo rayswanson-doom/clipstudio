@@ -212,7 +212,7 @@ class LayoutTests(unittest.TestCase):
             page = self.open(mode=None if mode == "Idea2Video" else mode)
             page.get_by_label(field).wait_for(state="visible", timeout=15000)
             self.assertEqual(page.get_by_text("...or upload a text file").count(), 1 if uploader else 0, mode)
-            page.get_by_role("button", name="Create the video").wait_for(state="visible", timeout=10000)
+            page.get_by_role("button", name="Parse the story and continue").wait_for(state="visible", timeout=10000)
             for header in ("Story options", "Character consistency", "Camera angle preferences", "Podcast corner avatar overlay"):
                 page.get_by_text(header, exact=True).wait_for(state="visible", timeout=10000)
             self.assertEqual(page.get_by_label("YouTube URL").count(), 0)
@@ -243,7 +243,7 @@ class LayoutTests(unittest.TestCase):
         page.close()
 
     def test_meme_reaction_controls(self):
-        for mode in ("Clip Repurposer", "classic", None):
+        for mode in ("Clip Repurposer", "classic"):
             page = self.open(mode=mode) if mode else self.open()
             page.get_by_text("Contextual meme reactions").first.click()
             box = page.get_by_text("Enable Contextual Meme Reactions")
@@ -257,9 +257,38 @@ class LayoutTests(unittest.TestCase):
             self.assert_no_horizontal_overflow(page)
             page.close()
 
+    def test_three_step_wizard_flow(self):
+        """Story -> Asset Studio (cards, generate pictures, gate) -> Render step with locked assets and meme toggle."""
+        script = ("Title: Kitchen\n\nINT. KITCHEN - NIGHT\n\nMaya, a tall woman in a red apron with long black hair, stirs a pot.\n\n"
+                  "MAYA\nLOL that was hilarious!\n\nBOB\nNo way!\n\nEXT. STREET - DAY\n\nBob, an old man in a grey coat, waves.\n\nBOB\nGood morning!\n")
+        page = self.open(mode="Script2Video")
+        box = page.get_by_label("Your screenplay")
+        box.fill(script)
+        box.press("Control+Enter")
+        page.get_by_role("button", name="Parse the story and continue").click()
+        page.get_by_text("Pre-production asset gate").wait_for(timeout=60000)
+        for name in ("Maya", "Bob", "Kitchen", "Street"):
+            page.get_by_text(name, exact=True).first.wait_for(state="visible", timeout=10000)
+        self.assertTrue(page.get_by_role("button", name="Lock the assets and continue to step 3").is_disabled())
+        self.choose(page, "How should pictures be generated?", "Built-in painter (offline, simple flat art)")
+        page.get_by_role("button", name="Generate Reference Visuals").click()
+        page.get_by_text("Ready").first.wait_for(timeout=60000)
+        page.wait_for_function("""() => { const b = [...document.querySelectorAll('button')].find(
+            x => x.innerText.includes('Lock the assets')); return !!b && !b.disabled; }""", timeout=60000)
+        self.assert_no_horizontal_overflow(page)
+        page.screenshot(path=str(SHOTS / "desktop_asset_studio.png"), full_page=True)
+        page.get_by_role("button", name="Lock the assets and continue to step 3").click()
+        page.get_by_text("Storyboard (assets locked)").wait_for(timeout=30000)
+        page.get_by_role("button", name="Render the episode").wait_for(state="visible", timeout=10000)
+        page.get_by_text("Contextual meme reactions").first.click()
+        page.get_by_text("Enable Contextual Meme Reactions").wait_for(state="visible", timeout=10000)
+        self.assert_no_horizontal_overflow(page)
+        page.screenshot(path=str(SHOTS / "desktop_wizard_step3.png"), full_page=True)
+        page.close()
+
     def test_story_validation_message(self):
         page = self.open(mode="Script2Video")
-        page.get_by_role("button", name="Create the video").click()
+        page.get_by_role("button", name="Parse the story and continue").click()
         page.get_by_text("Type or upload some text first.").wait_for(timeout=10000)
         page.close()
 

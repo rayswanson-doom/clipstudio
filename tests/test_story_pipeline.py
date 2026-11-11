@@ -59,7 +59,11 @@ class StoryPipelineTests(unittest.TestCase):
             r, _ = self.run_it(mode="script2video", folder_id="FOLDER")
         self.assertEqual(r["drive_link"], "https://drive/x")
         self.assertEqual({f for _, f in sent}, {"FOLDER"})
-        self.assertEqual(sorted(n.rsplit(".", 1)[1] for n, _ in sent), ["mp4", "zip"])  # the render AND its project files
+        exts = sorted(n.rsplit(".", 1)[1] for n, _ in sent)
+        self.assertEqual([e for e in exts if e in ("mp4", "zip")], ["mp4", "zip"])  # the render AND its project files
+        self.assertIn("json", exts)                                                 # assets.json (the prompt cards)
+        self.assertGreaterEqual(exts.count("png"), 3)                               # character sheets + location pictures
+        self.assertTrue(r["asset_links"])
         self.assertTrue(r["project_link"])
         with mock.patch.object(pipeline, "drive_status", return_value="ready"), \
                 mock.patch.object(pipeline, "upload_to_google_drive", side_effect=RuntimeError("boom")):
@@ -118,7 +122,7 @@ class StoryPipelineTests(unittest.TestCase):
         r, _ = self.run_it(mode="script2video", host_avatar={"style": "anime", "position": "Top-Right", "scale": 0.3})
         self.assertTrue(os.path.isfile(os.path.join(r["project_dir"], "work", "portrait_host.png")))
         off, _ = self.run_it(mode="script2video", use_portraits=False, continuity=False)
-        self.assertEqual(off["drift"], [])  # no portraits on screen, so nothing to compare
+        self.assertTrue(off["drift"])  # the scenic renderer always conditions on the locked pictures (the switches only affect the tile animatic)
         self.assertTrue(os.path.isfile(off["video_path"]))
         strict, _ = self.run_it(mode="script2video", drift_threshold=0.0)
         self.assertTrue(any(d["status"] != "ok" for d in strict["drift"]))

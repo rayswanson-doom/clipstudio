@@ -388,6 +388,16 @@ def collect_final_videos(result: dict) -> list:
     return out
 
 
+def collect_asset_files(book) -> list:
+    """The pre-production assets worth keeping on Drive: every character sheet / location picture that exists on
+    disk, plus the prompt cards (assets.json). `book` is an asset_manager.AssetBook."""
+    files = [p for p in book.image_paths() if os.path.isfile(p)]
+    card_file = os.path.join(str(book.folder), "assets.json")
+    if os.path.isfile(card_file):
+        files.append(card_file)
+    return files
+
+
 def zip_folder(folder: str, zip_path: str, skip=("work",)) -> str:
     """Zip a project folder (script, storyboard, characters, graph, subtitles...) for backup, leaving out the
     scratch sub-folders named in `skip`. Returns zip_path."""

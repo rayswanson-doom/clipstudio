@@ -256,6 +256,49 @@ STORY = {"mode": "script2video", "plan": {"title": "T"}, "script": "INT. A - DAY
                                                            "camera_movement": "static", "characters": ["Bob"], "camera_prompt": "cp"}]}}
 
 
+SCRIPT = """Title: Kitchen Mix-up
+
+INT. KITCHEN - NIGHT
+
+Maya, a tall woman in a red apron with long black hair, stirs a pot.
+
+MAYA
+LOL that was hilarious!
+
+BOB
+No way, I can't believe it!
+
+EXT. STREET - DAY
+
+Bob, an old man in a grey coat, waves from the street.
+
+BOB
+Good morning!
+"""
+
+
+def real_plan(folder, mode="script2video"):
+    """A genuine planned episode with its asset gate open and the prompt cards saved in `folder`."""
+    import vimax_orchestrator as vo
+    plan = vo.ViMaxOrchestrator().run(SCRIPT, mode=mode)
+    vo.open_asset_gate(plan, folder)
+    plan.update({"assets_dir": folder, "frame_size": [180, 320], "warnings": [], "project_dir": folder + "_p", "video_path": None})
+    return plan
+
+
+def wizard_state(folder, step, mode="script2video", fill=False):
+    plan = real_plan(folder, mode)
+    if fill:
+        am = pipeline.asset_manager
+        book = am.AssetBook.load(folder)
+        am.generate_images(book, backend="draw", frame_size=(180, 320))
+        book.save()
+    return {"step": step, "source": SCRIPT, "plan": plan, "temp": [], "seen": {}, "backend": "draw",
+            "common": {"mode": mode, "folder_id": None, "output_dir": "/tmp/o", "provider": "offline", "api_key": None, "style": "human",
+                       "target_seconds": 30.0, "episode": 1, "episodes": None, "all_episodes": False, "camera": None,
+                       "use_portraits": True, "continuity": True, "drift_threshold": 0.35, "host_avatar": None}}
+
+
 class StoryTabTests(unittest.TestCase):
     def test_controls_exist_in_every_story_mode(self):
         for mode, label in (("idea2video", "Idea2Video"), ("novel2video", "Novel2Video"), ("script2video", "Script2Video")):
@@ -279,7 +322,8 @@ class StoryTabTests(unittest.TestCase):
         self.assertTrue(any("Type or upload" in c[1][0] for c in f.names("warning")))
 
     def test_script_run_forwards_every_option_and_shows_results(self):
-        with mock.patch.object(pipeline, "run_story_pipeline", return_value=STORY) as rs:
+        plan = real_plan(tempfile.mkdtemp())
+        with mock.patch.object(pipeline, "run_story_pipeline", return_value=plan) as rs:
             f = run_app(FakeSt({"lab_mode": "Script2Video", "story_text_script2video": "INT. A - DAY\n\nBOB\nHi\n",
                                 "story_provider": "Groq (needs an API key)", "story_api_key": " k ", "story_style": "Anime",
                                 "story_seconds": 30, "drive_folder_id": "F", "story_portraits": False, "story_continuity": False,
@@ -295,7 +339,11 @@ class StoryTabTests(unittest.TestCase):
         self.assertEqual(kw["host_avatar"], {"style": "anime", "position": "Top-Left", "xy": None, "scale": 0.33})
         self.assertIsNone(kw["episodes"])
         self.assertFalse(kw["all_episodes"])
-        self.assertEqual(f.names("video")[-1][1][0], "/tmp/s.mp4")
+        self.assertFalse(kw["render"])  # step 1 only plans; rendering waits for the asset gate
+        self.assertNotIn("memes", kw)
+        wiz = f.session_state["wiz_script2video"]
+        self.assertEqual(wiz["step"], 2)
+        self.assertEqual(wiz["common"]["host_avatar"]["position"], "Top-Left")
 
     def test_novel_makes_every_episode_by_default(self):
         with mock.patch.object(pipeline, "run_story_pipeline", return_value={**STORY, "mode": "novel2video"}) as rs:
@@ -577,7 +625,11 @@ class MemePanelTests(unittest.TestCase):
     def test_toggle_is_present_in_every_generating_mode_and_off_by_default(self):
         for inputs, prefix in (({"lab_mode": "Clip Repurposer"}, "vugola"), ({"idea_flavor": "Narrated video with a 3D avatar (classic)"}, "viewmax"),
                                ({}, "story"), ({"lab_mode": "Script2Video"}, "story"), ({"lab_mode": "Novel2Video"}, "story")):
-            f = run_app(FakeSt(inputs))
+            f = FakeSt(inputs)
+            if prefix == "story":  # the story modes show it in wizard step 3
+                mode = {"Script2Video": "script2video", "Novel2Video": "novel2video"}.get(inputs.get("lab_mode"), "idea2video")
+                f.session_state[f"wiz_{mode}"] = wizard_state(tempfile.mkdtemp(), 3, mode, fill=True)
+            f = run_app(f)
             boxes = [c for c in f.names("checkbox") if c[2]["key"] == f"{prefix}_meme_on"]
             self.assertEqual(len(boxes), 1, inputs)
             self.assertEqual(boxes[0][1][0], "Enable Contextual Meme Reactions")
@@ -627,4 +679,99 @@ class MemePanelTests(unittest.TestCase):
         f = ClipFake({"vugola_meme_up": [Up()], "vugola_meme_emo": "laugh"}, clicked=["vugola_meme_add"])
         run_app(f)
         self.assertTrue(list(Path(self.tmp, "laugh").glob("lol*.mp4")), f.names("error"))
+
+
+class WizardTests(unittest.TestCase):
+    def setUp(self):
+        import os
+        self.tmp = tempfile.mkdtemp()
+        self._old = os.environ.get("CINEPULSE_MEMES")
+        os.environ["CINEPULSE_MEMES"] = os.path.join(self.tmp, "memes")
+        self.folder = os.path.join(self.tmp, "assets")
+
+    def tearDown(self):
+        import os
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        if self._old is None:
+            os.environ.pop("CINEPULSE_MEMES", None)
+        else:
+            os.environ["CINEPULSE_MEMES"] = self._old
+
+    def app(self, step, inputs=None, clicked=(), fill=False, mode="script2video"):
+        f = FakeSt({"lab_mode": "Script2Video", **(inputs or {})}, clicked=clicked)
+        f.session_state[f"wiz_{mode}"] = wizard_state(self.folder, step, mode, fill)
+        return run_app(f), f.session_state[f"wiz_{mode}"]
+
+    def test_step1_is_the_default_and_has_no_render_controls(self):
+        f = run_app(FakeSt({"lab_mode": "Script2Video"}))
+        labels = [c[1][0] for c in f.names("button")]
+        self.assertIn("Parse the story and continue", labels)
+        self.assertNotIn("Render the episode", labels)
+        self.assertTrue(any("Story &amp; script" in str(c[1][0]) for c in f.names("markdown")))
+
+    def test_step2_shows_a_card_per_character_and_location(self):
+        f, _ = self.app(2)
+        keys = {c[2]["key"] for n in ("text_area", "file_uploader", "button") for c in f.names(n)}
+        for cid in ("char_Maya", "char_Bob", "loc_kitchen", "loc_street"):
+            self.assertIn(f"asset_prompt_script2video_{cid}", keys)
+            self.assertIn(f"asset_up_script2video_{cid}", keys)
+            self.assertIn(f"asset_gen_script2video_{cid}", keys)
+        self.assertIn("asset_gen_all", keys)
+        self.assertTrue(any("Generate Reference Visuals" == c[1][0] for c in f.names("button")))
+
+    def test_generate_all_fills_the_book(self):
+        _, wiz = self.app(2, clicked=["asset_gen_all"], inputs={"asset_backend_script2video": "Built-in painter (offline, simple flat art)"})
+        book = pipeline.asset_manager.AssetBook.load(self.folder)
+        self.assertTrue(book.ready())
+        self.assertEqual(set(wiz["plan"]["asset_gate"]["required"]), set(book.cards))
+
+    def test_upload_attaches_a_picture_and_bad_files_are_rejected(self):
+        import cv2
+        import numpy as np
+        ok, png = cv2.imencode(".png", np.full((200, 100, 3), 120, np.uint8))
+        good = FakeUpload("maya.png", png.tobytes())
+        good.getvalue = lambda: png.tobytes()
+        _, _ = self.app(2, inputs={"asset_up_script2video_char_Maya": good})
+        book = pipeline.asset_manager.AssetBook.load(self.folder)
+        self.assertEqual(book.cards["char:Maya"]["source"], "upload")
+        bad = FakeUpload("x.png", b"not an image")
+        bad.getvalue = lambda: b"not an image"
+        f, _ = self.app(2, inputs={"asset_up_script2video_loc_kitchen": bad})
+        self.assertTrue(any("could not be read" in c[1][0] for c in f.names("error")))
+        self.assertIn("loc:kitchen", pipeline.asset_manager.AssetBook.load(self.folder).missing())
+
+    def test_the_gate_stays_closed_until_every_card_has_a_picture(self):
+        f, wiz = self.app(2, clicked=["wiz_to3"])
+        self.assertEqual(wiz["step"], 2)
+        self.assertTrue(any("asset gate is closed" in c[1][0] for c in f.names("error")))
+
+    def test_closing_the_gate_moves_to_step3_with_locked_assets_in_the_preview(self):
+        f, wiz = self.app(2, clicked=["wiz_to3"], fill=True)
+        self.assertEqual(wiz["step"], 3)
+        self.assertFalse(wiz["plan"]["asset_gate"]["open"])
+        f, _ = self.app(3, fill=True)
+        self.assertGreaterEqual(len(f.names("image")), 4)  # location + character thumbnails
+        self.assertIn("Render the episode", [c[1][0] for c in f.names("button")])
+
+    def test_step3_render_passes_the_locked_book_and_shows_the_result(self):
+        res = {**STORY, "mode": "script2video"}
+        with mock.patch.object(pipeline, "run_story_pipeline", return_value=res) as rs:
+            f, wiz = self.app(3, clicked=["wiz_render"], fill=True, inputs={"story_voice": True, "story_meme_on": True})
+        kw = rs.call_args[1]
+        self.assertTrue(kw["render"] and kw["voice"])
+        self.assertIs(kw["plan_result"], wiz["plan"])
+        self.assertTrue(kw["asset_book"].ready())
+        self.assertTrue(kw["memes"]["enabled"])
+        self.assertEqual(kw["mode"], "script2video")
+        self.assertEqual(wiz["step"], 4)
+        self.assertEqual(f.session_state["story_result"], res)
+
+    def test_start_over_and_back_buttons(self):
+        _, wiz = self.app(2, clicked=["wiz_back1"])
+        self.assertEqual(wiz["step"], 1)
+        f = FakeSt({"lab_mode": "Script2Video"}, clicked=["wiz_reset"])
+        f.session_state["wiz_script2video"] = wizard_state(self.folder, 2)
+        run_app(f)
+        self.assertNotIn("wiz_script2video", f.session_state)
 

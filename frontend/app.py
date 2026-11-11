@@ -772,10 +772,8 @@ def render_narrated_generator(folder_id: str) -> None:
                 st.link_button("Open in Google Drive", result["drive_link"])
 
 
-def render_story_panel(folder_id: str, mode: str) -> None:
-    """Idea2Video / Novel2Video / Script2Video: the ViMax-style agents plan it, the CPU renderer makes it, Drive keeps it."""
-    st.markdown(steps_html(["Director", "Screenwriter", "Characters", "Storyboard", "Consistency check", "Render", "Drive backup"]),
-                unsafe_allow_html=True)
+def _story_step1(folder_id: str, mode: str, wkey: str) -> None:
+    """Step 1 - the story: idea / screenplay / novel -> narrative beats, characters, locations, storyboard (no render yet)."""
     hints = {"idea2video": "Describe the story in a few sentences. Each episode takes its share of it.",
              "script2video": "Paste a screenplay: INT./EXT. headings, CHARACTER names, (parentheticals) and dialogue.",
              "novel2video": "Paste a chapter or a whole novel, or upload a .txt file below."}
@@ -805,19 +803,20 @@ def render_story_panel(folder_id: str, mode: str) -> None:
                 all_eps = st.checkbox("Make every episode", value=mode == "novel2video", key="story_all_episodes")
             with e3:
                 episode = st.number_input("...or just episode", 1, 12, 1, key="story_episode", disabled=bool(all_eps))
-        render_on = st.checkbox("Also render the videos", value=True, key="story_render")
-        voice_on = st.checkbox("Add a narrator voice (needs internet)", value=False, key="story_voice", disabled=not render_on)
-        st.caption("The video is a stylised animatic: painted character portraits, location backdrops and subtitles. "
-                   "It is not photorealistic AI video. Finished videos and their project files are backed up to the "
-                   "Google Drive folder from the sidebar.")
+        st.caption("Next you will review every character and location and give each a reference picture, then render. "
+                   "The video is a stylised 2D scene animation (background plate + cut-out characters + camera moves), "
+                   "not photorealistic AI video. Finished videos and the asset pictures are backed up to the Google "
+                   "Drive folder from the sidebar.")
 
     with st.expander("Character consistency", expanded=False):
-        portraits_on = st.checkbox("Show each character's portrait in every shot they appear in", value=True, key="story_portraits")
+        portraits_on = st.checkbox("Show each character's portrait in every shot they appear in", value=True, key="story_portraits",
+                                   help="Only used by the older portrait-tile animatic; the scene renderer always uses the locked pictures.")
         continuity_on = st.checkbox("Start each shot from the previous shot's last frame (scene continuity)", value=True,
-                                    key="story_continuity")
+                                    key="story_continuity",
+                                    help="Only used by the older portrait-tile animatic.")
         tolerance = st.slider("Appearance drift tolerance (%)", 10, 60, 35, key="story_tolerance",
-                              help="How much a character may differ from their anchor portrait before the drift report "
-                                   "flags it. Lower is stricter.")
+                              help="How much a character may differ from their locked reference picture in the rendered "
+                                   "frame before the drift report flags it. Lower is stricter.")
 
     with st.expander("Camera angle preferences", expanded=False):
         k1, k2, k3 = st.columns(3)
@@ -850,9 +849,7 @@ def render_story_panel(folder_id: str, mode: str) -> None:
         st.caption("The host is a framed still portrait. The lip-synced 3D avatar is in Idea2Video > "
                    "'Narrated video with a 3D avatar (classic)'. Story characters keep clear of the host's corner.")
 
-    meme_cfg = render_meme_panel("story")
-
-    if st.button("Create the video" if render_on else "Plan the story", type="primary", key="story_run"):
+    if st.button("Parse the story and continue", type="primary", key="story_run"):
         temp = []
         try:
             source = text
@@ -861,6 +858,8 @@ def render_story_panel(folder_id: str, mode: str) -> None:
                 temp.append(path)
                 import novel_adapter
                 source = novel_adapter.read_text_file(path)
+                cleanup_uploads([path])
+                temp.clear()
             if not source.strip():
                 st.warning("Type or upload some text first.")
             else:
@@ -870,25 +869,251 @@ def render_story_panel(folder_id: str, mode: str) -> None:
                 if host_on:
                     host = {"style": MODEL_TYPES[style_label], "position": host_pos, "xy": host_xy, "scale": host_scale / 100.0}
                     if host_file is not None:
-                        hp = save_upload(host_file)
+                        hp = save_upload(host_file)  # kept until the wizard ends: Step 3 renders with it
                         temp.append(hp)
                         host["image"] = hp
-                st.session_state["story_result"] = pipeline.run_story_pipeline(
-                    source, mode=mode, folder_id=folder_id or None, output_dir=str(OUTPUT_DIR), progress=callback,
+                common = dict(
+                    mode=mode, folder_id=folder_id or None, output_dir=str(OUTPUT_DIR),
                     provider=provider, api_key=(api_key.strip() or None) if provider != "offline" else None,
                     style=MODEL_TYPES[style_label], target_seconds=float(seconds), episode=int(episode),
                     episodes=int(episodes) if mode in ("idea2video", "novel2video") and (all_eps or mode == "idea2video") else None,
-                    all_episodes=bool(all_eps), render=bool(render_on), voice=bool(voice_on and render_on),
+                    all_episodes=bool(all_eps),
                     camera={"size": CAMERA_SIZES[size_label], "angle": CAMERA_ANGLES[angle_label], "movement": CAMERA_MOVES[move_label]},
                     use_portraits=bool(portraits_on), continuity=bool(continuity_on), drift_threshold=tolerance / 100.0,
-                    host_avatar=host, memes=meme_cfg if render_on else None)
+                    host_avatar=host)
+                plan = pipeline.run_story_pipeline(source, progress=callback, render=False, **common)
+                _wizard_cleanup(st.session_state.get(wkey))
+                st.session_state[wkey] = {"step": 2, "source": source, "common": common, "plan": plan, "temp": list(temp),
+                                          "seen": {}, "backend": "auto"}
+                st.session_state.pop("story_result", None)
+                temp.clear()
+                st.rerun()
         except Exception as exc:
-            st.session_state.pop("story_result", None)
             st.error(f"Something went wrong: {exc}")
         finally:
             cleanup_uploads(temp)
 
-    show_story_result(st.session_state.get("story_result"), mode)
+ASSET_BACKENDS = {"Auto: free online generator, then local CPU model, then built-in painter": "auto",
+                  "Free online generator (needs internet)": "online",
+                  "Local CPU diffusers model (optional install)": "diffusers",
+                  "Built-in painter (offline, simple flat art)": "draw"}
+WIZARD_STEPS = ["Story & script", "Asset studio", "Render episode"]
+
+
+def wizard_steps_html(current: int) -> str:
+    inner = "".join(
+        f'<span class="cp-step"{" style=&quot;border-color:var(--cp-a2)&quot;" if i == current else ""}><b>{i}</b>{_e(name)}'
+        f'{" (current)" if i == current else ""}</span>' for i, name in enumerate(WIZARD_STEPS, start=1))
+    return f'<div class="cp-steps">{inner}</div>'
+
+
+def _wizard_cleanup(wiz) -> None:
+    if wiz:
+        cleanup_uploads(wiz.get("temp") or [])
+
+
+def _asset_book(wiz):
+    """The asset book of the planned episode (kept on disk in the project's assets folder)."""
+    return pipeline.asset_manager.AssetBook.load(wiz["plan"]["assets_dir"])
+
+
+def _asset_card(book, card: dict, mode: str, wiz: dict, backend_key: str) -> None:
+    am = pipeline.asset_manager
+    cid, sid = card["id"], card["id"].replace(":", "_").replace(" ", "_")
+    with st.container(border=True):
+        left, right = st.columns([1, 2])
+        with left:
+            if card.get("image") and Path(card["image"]).is_file():
+                st.image(card["image"], width=150)
+            else:
+                st.markdown('<span class="cp-chip">No picture yet</span>', unsafe_allow_html=True)
+        with right:
+            kind = "Character" if card["kind"] == "character" else "Location"
+            st.markdown(f"**{_e(card['name'])}**  " + badge(kind) + "  "
+                        + badge("Ready" if card.get("image") else "Needs a picture", "ok" if card.get("image") else "warn"),
+                        unsafe_allow_html=True)
+            if card["kind"] == "character":
+                t = card["traits"]
+                bits = [("Hair", t.get("hair")), ("Eyes", t.get("eyes")), ("Skin", t.get("skin")), ("Build", t.get("build")),
+                        ("Attire", card.get("attire")), ("Emotional role", card.get("emotional_role"))]
+            else:
+                bits = [("Setting", (card.get("int_ext") or "") + " " + ", ".join(card.get("times") or [])),
+                        ("Lighting", card.get("lighting")), ("Atmosphere", card.get("atmosphere")),
+                        ("Description", card.get("description"))]
+            st.markdown("<br>".join(f"<b>{_e(k)}:</b> {_e(v)}" for k, v in bits if v), unsafe_allow_html=True)
+        new_prompt = st.text_area("Image prompt (edit it if you like)", value=card["prompt"], key=f"asset_prompt_{mode}_{sid}", height=96)
+        up = st.file_uploader("Upload your own picture (.png / .jpg)" + (" - full length, standing" if card["kind"] == "character" else ""),
+                              type=["png", "jpg", "jpeg"], key=f"asset_up_{mode}_{sid}")
+        g1, g2 = st.columns(2)
+        with g1:
+            gen = st.button("Generate this picture", key=f"asset_gen_{mode}_{sid}")
+        with g2:
+            clear = st.button("Remove the picture", key=f"asset_clear_{mode}_{sid}", disabled=not card.get("image"))
+        try:
+            if new_prompt and new_prompt.strip() and new_prompt.strip() != card["prompt"]:
+                book.set_prompt(cid, new_prompt)
+                book.save()
+            if up is not None:
+                token = (getattr(up, "name", ""), len(up.getvalue()) if hasattr(up, "getvalue") else 0)
+                if wiz["seen"].get(cid) != token:
+                    res = am.add_upload(book, cid, up.name, up.getvalue())
+                    wiz["seen"][cid] = token
+                    book.save()
+                    show_warnings(res["warnings"])
+                    st.rerun()
+            if clear:
+                book.clear_image(cid)
+                book.save()
+                wiz["seen"].pop(cid, None)
+                st.rerun()
+            if gen:
+                callback, bar = make_progress()
+                rep = am.generate_images(book, [cid], backend=backend_key, only_missing=False,
+                                         frame_size=tuple(wiz["plan"].get("frame_size") or (720, 1280)),
+                                         progress=lambda f, m: callback(m, f))
+                book.save()
+                show_warnings(rep["warnings"])
+                for why in rep["failed"].values():
+                    st.error(f"No picture could be made: {why}")
+                st.rerun()
+        except am.AssetError as exc:
+            st.error(str(exc))
+
+
+def _story_step2(folder_id: str, mode: str, wkey: str, wiz: dict) -> None:
+    """Step 2 - Interactive Asset Studio: a prompt card per character / location; upload pictures or generate them."""
+    import vimax_orchestrator
+
+    am = pipeline.asset_manager
+    book = _asset_book(wiz)
+    plan = wiz["plan"]
+    n_c, n_l, miss = len(book.characters), len(book.locations), len(book.missing())
+    st.markdown(stat_tiles([(len(plan["storyboard"]["shots"]), "Shots"), (n_c, "Characters"), (n_l, "Locations"),
+                            (miss, "Pictures still needed")]), unsafe_allow_html=True)
+    st.markdown("**Pre-production asset gate.** Rendering stays locked until every character and every location has a "
+                "reference picture. Upload your own, or let the app generate them from the prompts below. The same "
+                "picture is then used in every shot, so nobody changes face between cuts.")
+    show_warnings(plan.get("warnings"))
+    label = st.selectbox("How should pictures be generated?", list(ASSET_BACKENDS), key=f"asset_backend_{mode}")
+    backend_key = ASSET_BACKENDS[label]
+    wiz["backend"] = backend_key
+    b1, b2 = st.columns(2)
+    with b1:
+        if st.button("Generate Reference Visuals", type="primary", key="asset_gen_all", disabled=not miss,
+                     help="Creates a picture for every card that has none yet."):
+            try:
+                callback, bar = make_progress()
+                rep = am.generate_images(book, None, backend=backend_key, frame_size=tuple(plan.get("frame_size") or (720, 1280)),
+                                         progress=lambda f, m: callback(m, f))
+                book.save()
+                show_warnings(rep["warnings"])
+                for why in rep["failed"].values():
+                    st.error(f"No picture could be made: {why}")
+                st.rerun()
+            except am.AssetError as exc:
+                st.error(str(exc))
+    with b2:
+        if st.button("Back to step 1", key="wiz_back1"):
+            wiz["step"] = 1
+            st.rerun()
+    st.markdown("#### Characters")
+    for card in book.characters:
+        _asset_card(book, card, mode, wiz, backend_key)
+    st.markdown("#### Locations")
+    for card in book.locations:
+        _asset_card(book, card, mode, wiz, backend_key)
+    if book.missing():
+        st.info(f"{len(book.missing())} picture(s) still needed before you can continue.")
+    if st.button("Lock the assets and continue to step 3", type="primary", key="wiz_to3", disabled=bool(book.missing())):
+        try:
+            vimax_orchestrator.close_asset_gate(plan, book)
+            wiz["step"] = 3
+            st.rerun()
+        except am.AssetGateError as exc:
+            st.error(str(exc))
+
+
+def _story_step3(folder_id: str, mode: str, wkey: str, wiz: dict) -> None:
+    """Step 3 - storyboard preview with the character / location pictures locked, then the final render."""
+    import render_engine
+    am = pipeline.asset_manager
+    plan = wiz["plan"]
+    book = _asset_book(wiz)
+    shots = plan["storyboard"]["shots"]
+    chars, locs = book.character_images(), book.location_images()
+    gate_ok = not book.missing()
+    st.markdown(stat_tiles([(len(shots), "Shots"), (f"{plan['storyboard']['total_duration']:.0f}s", "Planned length"),
+                            (len(chars), "Characters locked"), (len(locs), "Locations locked")]), unsafe_allow_html=True)
+    if not gate_ok:
+        st.error("Some pictures are missing - go back to the Asset Studio.")
+    st.markdown("#### Storyboard (assets locked)")
+    for s in shots[:40]:
+        with st.container(border=True):
+            c1, c2, c3 = st.columns([1, 1, 3])
+            with c1:
+                lp = locs.get(am.location_key(s.get("location")))
+                if lp and Path(lp).is_file():
+                    st.image(lp, width=90, caption=str(s.get("location") or "").title())
+            with c2:
+                for name in s.get("characters", [])[:3]:
+                    if name in chars and Path(chars[name]).is_file():
+                        st.image(chars[name], width=60, caption=name)
+            with c3:
+                cam = render_engine.camera_for_shot(s, seed=s["idx"])
+                move = ("push-in" if cam["zoom"][1] > cam["zoom"][0] + 0.01 else "pull-out" if cam["zoom"][1] < cam["zoom"][0] - 0.01
+                        else "pan" if cam["pan"][0] != cam["pan"][1] else "tilt" if cam["tilt"][0] != cam["tilt"][1] else "static")
+                st.markdown(f"**{s['idx'] + 1}.** {_e(s['shot_type'])}, {_e(s['camera_angle'])}, camera: {move} - {s['end'] - s['start']:.1f}s")
+                if s.get("line"):
+                    st.caption(f"{s.get('speaker') or ''}: {s['line']}")
+                elif s.get("action"):
+                    st.caption(str(s["action"])[:140])
+    if len(shots) > 40:
+        st.caption(f"... and {len(shots) - 40} more shots.")
+    voice_on = st.checkbox("Add a narrator voice (needs internet)", value=False, key="story_voice")
+    meme_cfg = render_meme_panel("story")
+    r1, r2 = st.columns(2)
+    with r1:
+        go = st.button("Render the episode", type="primary", key="wiz_render", disabled=not gate_ok)
+    with r2:
+        if st.button("Back to the Asset Studio", key="wiz_back2"):
+            wiz["step"] = 2
+            st.rerun()
+    if go:
+        try:
+            callback, bar = make_progress()
+            result = pipeline.run_story_pipeline(
+                wiz["source"], progress=callback, render=True, voice=bool(voice_on), memes=meme_cfg, plan_result=plan,
+                asset_book=book, asset_backend=wiz.get("backend", "draw"), **wiz["common"])
+            st.session_state["story_result"] = result
+            _wizard_cleanup(wiz)
+            wiz["temp"] = []
+            wiz["step"] = 4
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Something went wrong: {exc}")
+
+
+def render_story_panel(folder_id: str, mode: str) -> None:
+    """Idea2Video / Novel2Video / Script2Video as a 3-step wizard: story -> asset studio -> render (then Drive keeps it)."""
+    wkey = f"wiz_{mode}"
+    wiz = st.session_state.get(wkey)
+    if wiz and wiz.get("step") == 4:  # finished: show the result, offer a new episode
+        wiz = None
+    step = wiz["step"] if wiz else 1
+    st.markdown(wizard_steps_html(step), unsafe_allow_html=True)
+    if step == 1:
+        _story_step1(folder_id, mode, wkey)
+    elif step == 2:
+        _story_step2(folder_id, mode, wkey, wiz)
+    else:
+        _story_step3(folder_id, mode, wkey, wiz)
+    if wiz:
+        if st.button("Start over", key="wiz_reset"):
+            _wizard_cleanup(wiz)
+            st.session_state.pop(wkey, None)
+            st.rerun()
+    else:
+        show_story_result(st.session_state.get("story_result"), mode)
 
 
 def show_story_result(result, mode: str) -> None:
@@ -922,6 +1147,23 @@ def show_story_result(result, mode: str) -> None:
         st.markdown('<div class="cp-clip-head"><span class="cp-rank">Characters</span></div>', unsafe_allow_html=True)
         for c in result["characters"]:
             st.markdown(f"**{_e(c['name'])}** - {_e(c['visual_identifier'])}")
+    if result.get("assets"):
+        with st.expander("Locked reference pictures (used in every shot)"):
+            book_dir = result["assets"].get("dir")
+            try:
+                book = pipeline.asset_manager.AssetBook.load(book_dir)
+                cols = st.columns(4)
+                for n, card in enumerate(book.cards.values()):
+                    with cols[n % 4]:
+                        if card.get("image") and Path(card["image"]).is_file():
+                            st.image(card["image"], width=110, caption=card["name"])
+            except (OSError, ValueError, KeyError):
+                st.caption(f"Pictures are in: {book_dir}")
+            links = result.get("asset_links") or {}
+            st.caption(f"{len(links)} asset file(s) backed up to Google Drive." if links else
+                       "Asset pictures are saved with the project; pick a Drive folder in the sidebar to back them up too.")
+            if result.get("conditioning"):
+                st.caption(f"{len(result['conditioning'])} character appearances were drawn from their locked reference pictures.")
     with st.expander("Shot list (episode 1)", expanded=True):
         for s in shots:
             who = ", ".join(s["characters"]) or "-"

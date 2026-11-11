@@ -12,7 +12,8 @@ Ideas borrowed (re-implemented in Python, CPU only, no Node / browser / GPU):
   * LTX-Video - generative B-roll is a GPU diffusion model; `ltx_video_status()` reports honestly whether it
                 could run here. It cannot on a CPU laptop, so the procedural background is the built-in provider.
 
-Tracks and z-order (bottom -> top):  B-roll  <  text overlays (OCR captions, titles)  <  3-D avatar.
+Tracks and z-order (bottom -> top):  B-roll / scenery  <  actors (cut-out characters)  <  text overlays (OCR captions,
+titles, kinetic captions)  <  3-D avatar  <  meme reactions.
 Voiceover and music are audio-only items mixed by ffmpeg (music is ducked under the voice).
 
     comp = Composition(size=(1080, 1920), fps=30)
@@ -29,8 +30,10 @@ import importlib.util
 import logging
 import math
 import os
+import re
 import subprocess
 import tempfile
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -49,9 +52,11 @@ logger = logging.getLogger(__name__)
 ProgressCb = Callable[[float], None]
 DEFAULT_SIZE = (1080, 1920)
 DEFAULT_FPS = 30
+CAMERA_OVERSCAN = 1.25
+ACTOR_SLIDE_SECONDS = 0.6
 ANIMATIONS = ("none", "fade", "slide_up", "slide_down", "slide_left", "slide_right", "pop", "zoom")
 BROLL_STYLES = ("aurora", "sunset", "mono", "day", "night", "interior")
-Z_ORDER = {"broll": 0, "cutaway": 5, "text": 10, "avatar": 20, "meme": 30}
+Z_ORDER = {"broll": 0, "actor": 3, "cutaway": 5, "text": 10, "avatar": 20, "meme": 30}
 
 
 # --------------------------------------------------------------------------- #
@@ -269,7 +274,7 @@ def ltx_video_status() -> dict:
 # --------------------------------------------------------------------------- #
 @dataclass
 class Item:
-    kind: str  # "broll" | "audio" | "text" | "avatar" | "meme"
+    kind: str  # "broll" | "audio" | "text" | "kinetic" | "actor" | "avatar" | "meme" | "cutaway"
     start: float
     end: Optional[float]
     name: str = ""
@@ -345,6 +350,121 @@ def render_text_layer(text: str, canvas_w: int, font_px: int = 0, max_width_frac
         d.text(((w - lw) / 2, pad + i * line_h - int(font_px * 0.05)), line, font=font, fill=tuple(color) + (255,))
     rgba = np.asarray(img, dtype=np.uint8)
     return np.ascontiguousarray(rgba[..., [2, 1, 0, 3]])  # RGBA -> BGRA
+
+
+# --------------------------------------------------------------------------- #
+# cinematic camera curves (a Revideo/LTX-style "camera move" over a still scenery plate)
+# --------------------------------------------------------------------------- #
+def camera_for_shot(shot: dict, seed: int = 0) -> dict:
+    """Pan / tilt / zoom curves for a shot from its shot size and camera movement text:
+    {"zoom": (z0, z1), "pan": (p0, p1), "tilt": (t0, t1), "shake": 0..1, "ease": name}.
+    zoom >= 1 (1 = the whole picture); pan / tilt in -1..1 = the share of the available travel (negative = camera
+    moves left / up). Static shots keep a rock-steady frame, everything else gets at least a slow push."""
+    mv = str(shot.get("camera_movement") or "").casefold()
+    size = str(shot.get("shot_type") or "").casefold()
+    base = 1.20 if "close" in size else (1.10 if "medium" in size else (1.0 if ("wide" in size or "establishing" in size) else 1.06))
+    sgn = -1.0 if (int(seed) % 2) else 1.0
+    cam = {"zoom": (base, base), "pan": (0.0, 0.0), "tilt": (0.0, 0.0), "shake": 0.0, "ease": "sine.inOut"}
+    if re.search(r"static|locked|still|tripod", mv):
+        return cam
+    if re.search(r"push|dolly in|zoom in|move in|approach|creep", mv):
+        cam["zoom"] = (base, base + 0.16)
+    elif re.search(r"pull|dolly out|zoom out|reveal|retreat|back", mv):
+        cam["zoom"] = (base + 0.16, base)
+    elif "pan" in mv:
+        d = -1.0 if "left" in mv else (1.0 if "right" in mv else sgn)
+        z = max(base, 1.18)
+        cam.update(zoom=(z, z), pan=(-0.85 * d, 0.85 * d))
+    elif "tilt" in mv:
+        d = -1.0 if "up" in mv else (1.0 if "down" in mv else sgn)
+        z = max(base, 1.18)
+        cam.update(zoom=(z, z), tilt=(-0.8 * d, 0.8 * d))
+    elif re.search(r"track|follow|truck|crane|orbit|arc|dolly", mv):
+        z = max(base, 1.14)
+        cam.update(zoom=(z, z + 0.04), pan=(-0.6 * sgn, 0.6 * sgn))
+    elif re.search(r"handheld|shak", mv):
+        cam.update(zoom=(base + 0.06, base + 0.06), shake=1.0)
+    else:
+        cam["zoom"] = (base, base + 0.07)  # a slow, subtle push is the default
+    return cam
+
+
+def camera_pose(cam: dict, p: float, t: float = 0.0) -> Tuple[float, float, float]:
+    """(zoom, pan, tilt) at progress p in 0..1 (t = seconds, only used for hand-held shake)."""
+    e = ease(cam.get("ease", "sine.inOut"), _clamp01(p))
+    z = cam["zoom"][0] + (cam["zoom"][1] - cam["zoom"][0]) * e
+    pan = cam["pan"][0] + (cam["pan"][1] - cam["pan"][0]) * e
+    tilt = cam["tilt"][0] + (cam["tilt"][1] - cam["tilt"][0]) * e
+    k = float(cam.get("shake", 0.0))
+    if k:
+        pan += 0.10 * k * math.sin(t * 7.3) * math.cos(t * 2.1)
+        tilt += 0.10 * k * math.sin(t * 5.9 + 1.0)
+    return max(1.0, z), max(-1.0, min(1.0, pan)), max(-1.0, min(1.0, tilt))
+
+
+# --------------------------------------------------------------------------- #
+# kinetic captions: a few words at a time, the spoken word highlighted, timed to the voiceover
+# --------------------------------------------------------------------------- #
+def kinetic_timing(text: str, start: float, end: float, words_per_chunk: int = 4, lead: float = 0.05) -> List[dict]:
+    """[{"word","t0","t1","chunk"}]: each word's share of [start, end] follows its length (long words take longer,
+    a sentence end adds a small pause), the same way edge-tts paces speech. Chunks break at punctuation or after
+    `words_per_chunk` words."""
+    toks = str(text).split()
+    if not toks:
+        return []
+    weights = [len(re.sub(r"\W+", "", w)) + 2.0 + (3.0 if re.search(r"[.!?;:]$", w) else (1.5 if w.endswith(",") else 0.0)) for w in toks]
+    span = max(0.2, (end - start) - lead)
+    total = sum(weights)
+    out, t, chunk, n_in = [], start + lead, 0, 0
+    for w, wt in zip(toks, weights):
+        dt = span * wt / total
+        out.append({"word": w, "t0": t, "t1": t + dt, "chunk": chunk})
+        t += dt
+        n_in += 1
+        if n_in >= words_per_chunk or re.search(r"[.!?;:]$", w):
+            chunk, n_in = chunk + 1, 0
+    return out
+
+
+def render_kinetic_layer(words: Sequence[str], active: int, canvas_w: int, font_px: int = 0, color=(255, 255, 255),
+                         highlight=(255, 214, 10), background=(0, 0, 0, 150), max_width_frac: float = 0.88) -> np.ndarray:
+    """One caption chunk as a BGRA array: the `active` word is larger and in the highlight colour with an underline."""
+    from PIL import Image, ImageDraw
+
+    font_px = font_px or max(18, int(canvas_w * 0.05))
+    font, big = _load_font(font_px), _load_font(int(font_px * 1.18))
+    probe = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
+    space = probe.textlength(" ", font=font)
+    pad = int(font_px * 0.5)
+    max_w = int(canvas_w * max_width_frac) - 2 * pad
+    lines: List[List[Tuple[str, float, bool]]] = [[]]
+    cur = 0.0
+    for i, w in enumerate(words):
+        f = big if i == active else font
+        ww = probe.textlength(w, font=f)
+        if lines[-1] and cur + space + ww > max_w:
+            lines.append([])
+            cur = 0.0
+        cur += (space if lines[-1] else 0.0) + ww
+        lines[-1].append((w, ww, i == active))
+    line_h = int(font_px * 1.42)
+    widths = [sum(x[1] for x in ln) + space * (len(ln) - 1) for ln in lines]
+    w_img, h_img = int(max(widths)) + 2 * pad, line_h * len(lines) + 2 * pad
+    img = Image.new("RGBA", (w_img, h_img), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((0, 0, w_img - 1, h_img - 1), radius=int(font_px * 0.7), fill=tuple(background))
+    for li, ln in enumerate(lines):
+        x = (w_img - widths[li]) / 2
+        base = pad + li * line_h + int(font_px * 1.05)
+        for w, ww, on in ln:
+            f = big if on else font
+            d.text((x, base), w, font=f, fill=(tuple(highlight) if on else tuple(color)) + (255,), anchor="ls",
+                   stroke_width=max(1, font_px // 18), stroke_fill=(0, 0, 0, 255))
+            if on:
+                d.rectangle((x, base + int(font_px * 0.12), x + ww, base + int(font_px * 0.12) + max(2, font_px // 12)), fill=tuple(highlight) + (255,))
+            x += ww + space
+    rgba = np.asarray(img, dtype=np.uint8)
+    return np.ascontiguousarray(rgba[..., [2, 1, 0, 3]])
 
 
 def _blend(canvas: np.ndarray, premult_bgr: np.ndarray, alpha: np.ndarray, x: int, y: int, gain: float = 1.0) -> None:
@@ -570,6 +690,85 @@ class Composition:
         return self._add(Item("text", start, end, str(text)[:40],
                               {"text": str(text), "position": position, "animation": animation, "font_px": font_px,
                                "group": group, "slot": slot, "color": color, "background": background}))
+
+    def add_scenery(self, image: str, start: float = 0.0, end: Optional[float] = None, camera: Optional[dict] = None,
+                    fade: float = 0.0) -> Item:
+        """A still background plate (the location's reference picture) with a programmatic camera move:
+        camera = camera_for_shot(shot) -> {"zoom","pan","tilt","shake","ease"}; None = a slow push."""
+        if not Path(image).is_file():
+            raise FileNotFoundError(f"Scenery picture not found: {image}")
+        cam = dict(camera or {"zoom": (1.0, 1.06), "pan": (0.0, 0.0), "tilt": (0.0, 0.0), "shake": 0.0, "ease": "sine.inOut"})
+        if min(cam["zoom"]) < 1.0:
+            raise ValueError("camera zoom must be >= 1.0")
+        return self._add(Item("broll", start, end, Path(image).name,
+                              {"source": str(image), "source_kind": "image", "motion": "camera", "camera": cam, "style": "aurora",
+                               "fade": fade, "loop": False, "seed": None}))
+
+    def add_actor(self, image: str, start: float = 0.0, end: Optional[float] = None, x: float = 0.5,
+                  x_to: Optional[float] = None, foot_y: float = 0.95, height: float = 0.55, entry: Optional[str] = None,
+                  exit: Optional[str] = None, speaking: Sequence[Tuple[float, float]] = (), flip: bool = False,
+                  shadow: bool = True, name: str = "") -> Item:
+        """A cut-out character (transparent PNG) standing in the scene: centre `x` (fraction of the width, drifting to
+        `x_to`), feet at `foot_y` (fraction of the height), `height` = its share of the frame height.
+        entry / exit: None | "left" | "right" | "bottom" | "fade" (a slide + fade over ~0.6 s). `speaking` = absolute
+        (start, end) times in which the character talks: it bobs gently then. A tiny idle breath runs all the time."""
+        import cv2
+
+        if not Path(image).is_file():
+            raise FileNotFoundError(f"Character picture not found: {image}")
+        for label, v in (("entry", entry), ("exit", exit)):
+            if v not in (None, "left", "right", "bottom", "fade"):
+                raise ValueError(f"{label} must be None, 'left', 'right', 'bottom' or 'fade'.")
+        if not (0.05 <= height <= 1.2):
+            raise ValueError("height must be between 0.05 and 1.2 (share of the frame height).")
+        img = cv2.imread(str(image), cv2.IMREAD_UNCHANGED)
+        if img is None or img.ndim < 3 or img.shape[2] != 4:
+            raise ValueError(f"'{Path(image).name}' needs a transparent cut-out (a PNG with an alpha channel).")
+        W, H = self.size
+        sh = int(round(H * height))
+        sw = int(round(img.shape[1] * sh / img.shape[0]))
+        if sw > W * 0.95:  # very wide picture: keep it inside the frame
+            sw, sh = int(W * 0.95), int(round(img.shape[0] * W * 0.95 / img.shape[1]))
+        if sw < W:  # keep the whole figure inside the frame (an off-screen slide is the entry / exit's job)
+            lo, hi = (sw / 2 + 4) / W, 1 - (sw / 2 + 4) / W
+            x = min(max(x, lo), hi)
+            x_to = None if x_to is None else min(max(x_to, lo), hi)
+        cx = x * W
+        rect = (int(cx - sw / 2), int(foot_y * H - sh), sw, sh)
+        return self._add(Item("actor", start, end, name or Path(image).stem,
+                              {"image": str(image), "x": float(x), "x_to": float(x if x_to is None else x_to), "foot_y": float(foot_y),
+                               "height": float(height), "entry": entry, "exit": exit, "speaking": [(float(a), float(b)) for a, b in speaking],
+                               "flip": bool(flip), "shadow": bool(shadow), "rect": rect, "size": (sw, sh)}))
+
+    def add_kinetic_caption(self, text: str, start: float, end: float, position="bottom", words_per_chunk: int = 4,
+                            font_px: int = 0, color=(255, 255, 255), highlight=(255, 214, 10),
+                            word_times: Optional[Sequence[dict]] = None) -> Item:
+        """Burned-in captions that follow the voice: a few words at a time, the word being spoken highlighted.
+        Timing is spread over [start, end] by word length unless exact `word_times` ([{"word","t0","t1"}]) are given."""
+        if end <= start:
+            raise ValueError("end must be after start")
+        if not str(text).strip():
+            raise ValueError("Caption text is empty.")
+        words = list(word_times) if word_times else kinetic_timing(text, start, end, words_per_chunk)
+        if word_times:
+            c, n = 0, 0
+            for w in words:
+                w.setdefault("chunk", c)
+                n += 1
+                if n >= words_per_chunk:
+                    c, n = c + 1, 0
+        return self._add(Item("kinetic", start, end, str(text)[:40],
+                              {"words": words, "position": position, "slot": 0, "font_px": font_px, "color": color,
+                               "highlight": highlight, "group": "kinetic", "animation": "pop"}))
+
+    def actor_positions(self, t: float) -> List[Tuple[str, Tuple[int, int, int, int]]]:
+        """Where each actor's sprite is at time t: [(name, (x, y, w, h))] (before the idle bob)."""
+        r = _FrameRenderer(self, 1)
+        try:
+            return [(i.name, r.actor_rect_at(i, t)) for i in self.items
+                    if i.kind == "actor" and i.start - 1e-6 <= t < self._resolved_end(i)]
+        finally:
+            r.close()
 
     def add_ocr_overlays(self, segments: Sequence[dict], source_duration: Optional[float] = None, loop: bool = True,
                          offset: float = 0.0, max_lines: int = 40, position="auto", animation: str = "slide_up") -> List[Item]:
@@ -817,6 +1016,8 @@ class Composition:
                 "avatar": None if av is None else {"preset": av.data["preset"], "rect": av.data["rect"]},
                 "avatars": [{"name": i.name, "preset": i.data["preset"], "rect": i.data["rect"]}
                             for i in self.items if i.kind == "avatar"],
+                "actors": [{"name": i.name, "rect": i.data["rect"], "start": round(i.start, 2), "end": round(self._resolved_end(i), 2),
+                            "image": i.data["image"]} for i in self.items if i.kind == "actor"],
                 "memes": [{"name": i.name, "mode": i.data["mode"], "start": round(i.start, 2), "end": round(self._resolved_end(i), 2),
                            "rect": i.data["rect"], "preset": i.data["preset"]} for i in self.items if i.kind == "meme"]}
 
@@ -831,6 +1032,10 @@ class _FrameRenderer:
         self.broll = sorted((i for i in comp.items if i.kind == "broll"), key=lambda i: i.start)
         self.texts = sorted((i for i in comp.items if i.kind == "text"), key=lambda i: i.start)
         self.avatars = [i for i in comp.items if i.kind == "avatar"]
+        self.actors = sorted((i for i in comp.items if i.kind == "actor"), key=lambda i: i.start)
+        self.kinetics = sorted((i for i in comp.items if i.kind == "kinetic"), key=lambda i: i.start)
+        self._kin_layers: Dict[tuple, np.ndarray] = {}
+        self._actor_cache: Dict[int, tuple] = {}
         self.cutaways = sorted((i for i in comp.items if i.kind == "meme" and i.data["mode"] == "cutaway"), key=lambda i: i.start)
         self.memes = sorted((i for i in comp.items if i.kind == "meme" and i.data["mode"] == "overlay"), key=lambda i: i.start)
         self._src: Dict[int, object] = {}
@@ -852,7 +1057,8 @@ class _FrameRenderer:
                 img = cv2.imread(d["source"])
                 if img is None:
                     raise ValueError(f"Could not read image: {d['source']}")
-                self._src[key] = _avs.cover_crop(img, self.W, self.H)[0]
+                k = CAMERA_OVERSCAN if d.get("motion") == "camera" else 1.0  # extra pixels so a camera move stays sharp
+                self._src[key] = _avs.cover_crop(img, int(self.W * k), int(self.H * k))[0]
             else:
                 self._src[key] = _avs.LoopingBackground(d["source"], self.W, self.H, self.c.fps)
         return self._src[key]
@@ -868,6 +1074,19 @@ class _FrameRenderer:
             fr = src.next()
             if fr is None:
                 return None
+        if d["motion"] == "camera":
+            import cv2
+
+            end = self.c._resolved_end(item)
+            z, pan, tilt = camera_pose(d["camera"], (t - item.start) / max(0.1, end - item.start), t - item.start)
+            SH, SW = fr.shape[:2]
+            k = SW / self.W
+            sc = k / z  # source pixels per output pixel
+            cx = SW / 2 + pan * (SW - self.W * sc) / 2
+            cy = SH / 2 + tilt * (SH - self.H * sc) / 2
+            M = np.array([[sc, 0, cx - (self.W / 2) * sc], [0, sc, cy - (self.H / 2) * sc]], np.float32)
+            return cv2.warpAffine(fr, M, (self.W, self.H), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                                  borderMode=cv2.BORDER_REPLICATE)
         if d["motion"] == "ken_burns":
             end = self.c._resolved_end(item)
             p = ease("sine.inOut", _clamp01((t - item.start) / max(0.1, end - item.start)))
@@ -937,6 +1156,113 @@ class _FrameRenderer:
         x += int((layer.shape[1] - w) / 2 + dx * layer.shape[1])
         y += int((layer.shape[0] - h) / 2 + dy * layer.shape[0])
         _blend(canvas, pm, a, x, y, alpha)
+
+    # -- actors (cut-out characters) ------------------------------------- #
+    def _actor_sprite(self, item: Item):
+        key = id(item)
+        if key not in self._actor_cache:
+            import cv2
+
+            d = item.data
+            img = cv2.imread(d["image"], cv2.IMREAD_UNCHANGED)
+            sw, sh = d["size"]
+            if d["flip"]:
+                img = img[:, ::-1]
+            img = cv2.resize(img, (sw, sh), interpolation=cv2.INTER_AREA if img.shape[0] > sh else cv2.INTER_CUBIC)
+            al = (img[..., 3:4].astype(np.float32) / 255.0)
+            pm = img[..., :3].astype(np.float32) * al
+            shadow = None
+            if d["shadow"]:
+                shw, shh = max(8, int(sw * 0.85)), max(4, int(sw * 0.10))
+                sh_img = np.zeros((shh * 3, shw + 24), np.float32)
+                cv2.ellipse(sh_img, (sh_img.shape[1] // 2, sh_img.shape[0] // 2), (shw // 2, shh // 2), 0, 0, 360, 1.0, -1)
+                shadow = cv2.GaussianBlur(sh_img, (0, 0), max(1.5, shh / 2))[..., None]
+            self._actor_cache[key] = (pm, al, shadow)
+        return self._actor_cache[key]
+
+    def actor_rect_at(self, item: Item, t: float) -> Tuple[int, int, int, int]:
+        """Where the actor's sprite is at time t (after entry / exit slides, before the idle bob): (x, y, w, h)."""
+        d = item.data
+        sw, sh = d["size"]
+        end = self.c._resolved_end(item)
+        length = max(0.1, end - item.start)
+        lt = t - item.start
+        cx = (d["x"] + (d["x_to"] - d["x"]) * ease("sine.inOut", _clamp01(lt / length))) * self.W
+        y = d["foot_y"] * self.H - sh
+        a_in = ACTOR_SLIDE_SECONDS
+        if d["entry"] and lt < a_in:
+            off = 1.0 - ease("power3.out", _clamp01(lt / a_in))
+            cx, y = self._actor_offset(d["entry"], cx, y, sw, sh, off)
+        if d["exit"] and lt > length - a_in:
+            off = ease("power2.in", _clamp01((lt - (length - a_in)) / a_in))
+            cx, y = self._actor_offset(d["exit"], cx, y, sw, sh, off)
+        return int(cx - sw / 2), int(y), sw, sh
+
+    def _actor_offset(self, how: str, cx: float, y: float, sw: int, sh: int, off: float):
+        if how == "left":
+            cx -= off * (cx + sw / 2 + 12)
+        elif how == "right":
+            cx += off * ((self.W - cx) + sw / 2 + 12)
+        elif how == "bottom":
+            y += off * sh * 0.55
+        return cx, y
+
+    def _draw_actor(self, canvas: np.ndarray, item: Item, t: float) -> None:
+        d = item.data
+        pm, al, shadow = self._actor_sprite(item)
+        end = self.c._resolved_end(item)
+        lt = t - item.start
+        x, y, sw, sh = self.actor_rect_at(item, t)
+        alpha = 1.0
+        if d["entry"] and lt < ACTOR_SLIDE_SECONDS:
+            alpha = ease("power1.out", _clamp01(lt / (ACTOR_SLIDE_SECONDS * 0.8)))
+        if d["exit"] and lt > (end - item.start) - ACTOR_SLIDE_SECONDS:
+            alpha = min(alpha, 1.0 - ease("power1.in", _clamp01((lt - ((end - item.start) - ACTOR_SLIDE_SECONDS)) / ACTOR_SLIDE_SECONDS)))
+        if alpha <= 0.003:
+            return
+        bob = 0.0045 * self.H * math.sin(2 * math.pi * 0.42 * lt + (zlib.crc32(item.name.encode('utf-8')) % 7))  # breathing
+        for a, b in d["speaking"]:
+            if a - 0.05 <= t <= b + 0.1:
+                env = min(1.0, (t - a + 0.05) / 0.15, (b + 0.1 - t) / 0.15)
+                bob -= 0.011 * self.H * abs(math.sin(2 * math.pi * 2.4 * (t - a))) * max(0.0, env)
+                break
+        if shadow is not None:
+            fy = int(d["foot_y"] * self.H)
+            _blend(canvas, np.zeros((shadow.shape[0], shadow.shape[1], 3), np.float32), shadow, x + sw // 2 - shadow.shape[1] // 2,
+                   fy - shadow.shape[0] // 2 + int(0.015 * self.H), 0.55 * alpha)
+        _blend(canvas, pm, al, x, int(y + bob), alpha)
+
+    # -- kinetic captions ------------------------------------------------- #
+    def _draw_kinetic(self, canvas: np.ndarray, item: Item, t: float) -> None:
+        d = item.data
+        words = d["words"]
+        cur = None
+        for i, w in enumerate(words):
+            if w["t0"] - 1e-6 <= t:
+                cur = i
+            else:
+                break
+        if cur is None:
+            cur = 0
+        chunk = words[cur]["chunk"]
+        idxs = [i for i, w in enumerate(words) if w["chunk"] == chunk]
+        active = idxs.index(cur)
+        key = (id(item), chunk, active)
+        if key not in self._kin_layers:
+            self._kin_layers[key] = render_kinetic_layer([words[i]["word"] for i in idxs], active, self.W, d["font_px"],
+                                                         d["color"], d["highlight"])
+        layer = self._kin_layers[key]
+        first_t = words[idxs[0]]["t0"]
+        pop = ease("back.out", _clamp01((t - first_t) / 0.18))
+        scale = 0.88 + 0.12 * pop
+        a = layer[..., 3:4].astype(np.float32) / 255.0
+        pm = layer[..., :3].astype(np.float32) * a
+        pm, a = _scale_sprite(pm, a, scale)
+        h, w = a.shape[:2]
+        x, y = self._text_xy(item, layer.shape[0], layer.shape[1])
+        x += (layer.shape[1] - w) // 2
+        y += (layer.shape[0] - h) // 2
+        _blend(canvas, pm, a, x, y, min(1.0, pop * 1.4))
 
     # -- avatar ---------------------------------------------------------- #
     def _avatar_sprite(self, item: Item):
@@ -1010,12 +1336,18 @@ class _FrameRenderer:
     def frame(self, i: int) -> np.ndarray:
         t = i / self.c.fps
         canvas = self._background(t)
+        for it in self.actors:
+            if it.start - 1e-6 <= t < self.c._resolved_end(it):
+                self._draw_actor(canvas, it, t)
         for it in self.cutaways:
             if it.start - 1e-6 <= t < self.c._resolved_end(it):
                 canvas = self._draw_cutaway(canvas, it, t)
         for it in self.texts:
             if it.start - 1e-6 <= t < self.c._resolved_end(it):
                 self._draw_text(canvas, it, t)
+        for it in self.kinetics:
+            if it.start - 1e-6 <= t < self.c._resolved_end(it):
+                self._draw_kinetic(canvas, it, t)
         for it in self.avatars:
             if it.start - 1e-6 <= t < self.c._resolved_end(it) or t >= it.start:
                 self._draw_avatar(canvas, it, t)

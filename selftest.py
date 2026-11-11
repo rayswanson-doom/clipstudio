@@ -28,7 +28,7 @@ MODULES = [
     "pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine", "avatar_sync",
     "ocr_engine", "visual_cues", "rapidocr_onnxruntime",
     "avatar_3d_engine", "glb_model", "soft_raster", "lipsync_en", "avatar_gestures", "demo_avatars", "render_engine",
-    "vimax_orchestrator", "novel_adapter", "script_parser", "dependency_graph", "meme_matcher",
+    "vimax_orchestrator", "novel_adapter", "script_parser", "dependency_graph", "meme_matcher", "asset_manager",
 ]
 
 
@@ -221,6 +221,34 @@ def check_memes() -> str:
     return f"{len(lib.clips)} starter clips, laugh matched, reaction spliced"
 
 
+def check_episode_studio() -> str:
+    """Asset gate -> prompt cards -> generated pictures -> locked references -> scenic render, all offline on the CPU."""
+    import asset_manager
+    import vimax_orchestrator as vo
+    import video_engine
+
+    script = ("INT. KITCHEN - NIGHT\n\nMaya, a tall woman in a red apron, stirs a pot.\n\nMAYA\nHello there!\n\n"
+              "BOB\nGood evening.\n")
+    with tempfile.TemporaryDirectory() as d:
+        plan = vo.ViMaxOrchestrator().run(script, mode="script2video", max_shots=4)
+        if not plan["asset_gate"]["open"]:
+            raise RuntimeError("the asset gate did not stop the run")
+        book = vo.open_asset_gate(plan, os.path.join(d, "assets"))
+        try:
+            vo.render_storyboard(plan, os.path.join(d, "x.mp4"), assets=book, size=(90, 160))
+            raise RuntimeError("rendering was allowed while the gate was closed")
+        except asset_manager.AssetGateError:
+            pass
+        asset_manager.generate_images(book, backend="draw")
+        vo.close_asset_gate(plan, book)
+        out = os.path.join(d, "ep.mp4")
+        res = vo.render_storyboard(plan, out, work_dir=os.path.join(d, "w"), assets=book, size=(90, 160), fps=8,
+                                   ffmpeg_path=video_engine.find_ffmpeg())
+        if res["locks"] or not res["conditioning"] or os.path.getsize(out) < 1000:
+            raise RuntimeError(f"scene render failed: {res['locks']}")
+    return f"{len(book.cards)} cards, gate held, {len(res['conditioning'])} locked appearances rendered"
+
+
 def check_story() -> str:
     """Story Studio on the CPU: screenplay -> agents -> consistency graph -> 2-shot animatic (no network, no GPU)."""
     import vimax_orchestrator as vo
@@ -343,6 +371,7 @@ def run_all(app_path: Optional[Path] = None, log: Callable[[str], None] = print)
         ("multi-track render engine", "fail", check_render_engine),
         ("story studio (agents + consistency graph)", "fail", check_story),
         ("auto-meme reactions", "fail", check_memes),
+        ("episode studio (asset gate + scene renderer)", "fail", check_episode_studio),
         ("on-screen text (OCR)", "fail", check_ocr),
         ("visual action cues", "fail", check_cues),
         ("app page", "fail", lambda: check_app_page(app_path)),

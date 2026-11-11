@@ -604,6 +604,30 @@ def build_pip_command(ffmpeg: str, base: str, avatar: str, deco_png: str, mask_p
     return cmd
 
 
+def join_clips(clips, output_path: str, ffmpeg_path: Optional[str] = None, list_dir: Optional[str] = None) -> str:
+    """Join clips that share codec / size / fps (the story renderer's shots) into one file, without re-encoding."""
+    import tempfile
+
+    ff = find_ffmpeg(ffmpeg_path)
+    clips = [str(c) for c in clips]
+    if not clips:
+        raise ValueError("There are no clips to join.")
+    for c in clips:
+        if not os.path.isfile(c):
+            raise FileNotFoundError(f"Clip not found: {c}")
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="join_", dir=list_dir) as tmp:
+        listing = Path(tmp) / "list.txt"
+        listing.write_text("".join(f"file '{Path(c).resolve().as_posix()}'\n" for c in clips), encoding="utf-8")
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        proc = subprocess.run([ff, "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(listing),
+                               "-c", "copy", "-movflags", "+faststart", str(out)], capture_output=True, text=True, creationflags=flags)
+    if proc.returncode != 0 or not out.is_file():
+        raise RuntimeError(f"ffmpeg could not join the shots: {proc.stderr[-400:]}")
+    return str(out)
+
+
 def splice_memes(input_path: str, output_path: str, matches, ffmpeg_path: Optional[str] = None,
                  progress: Optional[Callable[[float], None]] = None, border: int = 3) -> dict:
     """Lay reaction clips over a FINISHED video with ffmpeg alone (no frame-by-frame Python, so it is fast on a CPU).

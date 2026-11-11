@@ -31,7 +31,7 @@ class ImportTests(unittest.TestCase):
             f"sys.path.insert(0, {str(ROOT / 'backend')!r})\n"
             "import scorer, uploader, transcriber, tts_engine, video_engine, avatar_sync, ocr_engine, visual_cues, pipeline\n"
             "import avatar_3d_engine, glb_model, soft_raster, lipsync_en, avatar_gestures, demo_avatars, render_engine\n"
-            "import vimax_orchestrator, novel_adapter, script_parser, dependency_graph, meme_matcher\n"
+            "import vimax_orchestrator, novel_adapter, script_parser, dependency_graph, meme_matcher, asset_manager\n"
             "print('imports-ok')\n"
         )
         out = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=120)
