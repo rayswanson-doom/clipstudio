@@ -691,6 +691,17 @@ class Composition:
                               {"text": str(text), "position": position, "animation": animation, "font_px": font_px,
                                "group": group, "slot": slot, "color": color, "background": background}))
 
+    def add_generated_video(self, path: str, start: float = 0.0, end: Optional[float] = None, backend: str = "",
+                            includes_actors: bool = False, fade: float = 0.0) -> Item:
+        """A clip made by a video model (LTX-Video / Stable Video Diffusion / ...): the moving picture of the shot, used in
+        place of the still scenery plate. includes_actors=True when the model animated the characters too (the
+        cut-out actors are then not drawn over it)."""
+        if not Path(path).is_file():
+            raise FileNotFoundError(f"Generated video not found: {path}")
+        it = self.add_broll(path, start, end, motion="none", fade=fade, loop=True)
+        it.data.update({"generative": True, "backend": backend, "includes_actors": bool(includes_actors)})
+        return it
+
     def add_scenery(self, image: str, start: float = 0.0, end: Optional[float] = None, camera: Optional[dict] = None,
                     fade: float = 0.0) -> Item:
         """A still background plate (the location's reference picture) with a programmatic camera move:
@@ -755,7 +766,7 @@ class Composition:
             for w in words:
                 w.setdefault("chunk", c)
                 n += 1
-                if n >= words_per_chunk:
+                if n >= words_per_chunk or re.search(r"[.!?;:]$", str(w.get("word", ""))):
                     c, n = c + 1, 0
         return self._add(Item("kinetic", start, end, str(text)[:40],
                               {"words": words, "position": position, "slot": 0, "font_px": font_px, "color": color,

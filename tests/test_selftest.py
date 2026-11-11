@@ -76,7 +76,7 @@ class RunnerTests(unittest.TestCase):
     def test_all_ok(self):
         results = self.run_with()
         self.assertEqual({r[1] for r in results}, {"ok"})
-        self.assertEqual(len(results), 16)
+        self.assertEqual(len(results), 17)
 
     def test_hard_failure_is_reported(self):
         results = dict((r[0], r[1]) for r in self.run_with("check_face_model"))

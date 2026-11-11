@@ -893,6 +893,41 @@ def _story_step1(folder_id: str, mode: str, wkey: str) -> None:
         finally:
             cleanup_uploads(temp)
 
+VISUAL_MODES = {"2D Cinematic Composition Mode": "2d", "Generative AI Video Mode": "generative"}
+VIDEO_BACKENDS = {"Auto: local LTX-Video, then Stable Video Diffusion, then pollinations.ai": "auto",
+                  "Local LTX-Video (GPU + model weights)": "ltx",
+                  "Local Stable Video Diffusion (GPU + model weights)": "svd",
+                  "pollinations.ai video (API key, mostly paid)": "pollinations"}
+
+
+def _visual_mode_panel(mode: str) -> dict:
+    """The Step 3 switch between the 2D cinematic composition and generative AI video, with an honest readiness list."""
+    label = st.radio("Visual style", list(VISUAL_MODES), key=f"visual_mode_{mode}", horizontal=True,
+                     help="2D Cinematic Composition: locked scenery + cut-out characters with camera moves (runs anywhere). "
+                          "Generative AI Video: a video model animates each shot's locked first frame.")
+    vmode = VISUAL_MODES[label]
+    out = {"visual_mode": vmode, "video_backend": "auto", "video_api_key": None}
+    if vmode != "generative":
+        return out
+    import generative_video
+
+    blabel = st.selectbox("Video model", list(VIDEO_BACKENDS), key=f"video_backend_{mode}")
+    out["video_backend"] = VIDEO_BACKENDS[blabel]
+    key = st.text_input("pollinations.ai API key (only for that backend; kept in this session only)", type="password",
+                        key=f"video_key_{mode}")
+    out["video_api_key"] = key.strip() or None
+    rows = generative_video.capabilities(api_key=out["video_api_key"])
+    for r in rows:
+        if out["video_backend"] in ("auto", r["backend"]):
+            st.markdown(f"{'🟢' if r['ready'] else '⚪'} **{r['backend']}** - {_e(r['detail'])}")
+    if not any(r["ready"] for r in rows if out["video_backend"] in ("auto", r["backend"])):
+        st.warning("No video model is ready on this computer. Shots will fall back to the 2D cinematic composition, and the "
+                   "result will say so. (LTX-Video / Stable Video Diffusion need a CUDA GPU and downloaded weights.)")
+    else:
+        st.caption("Each shot falls back to the 2D composition if the model fails. Generation is slow: minutes per shot.")
+    return out
+
+
 ASSET_BACKENDS = {"Auto: free online generator, then local CPU model, then built-in painter": "auto",
                   "Free online generator (needs internet)": "online",
                   "Local CPU diffusers model (optional install)": "diffusers",
@@ -1070,6 +1105,7 @@ def _story_step3(folder_id: str, mode: str, wkey: str, wiz: dict) -> None:
     if len(shots) > 40:
         st.caption(f"... and {len(shots) - 40} more shots.")
     voice_on = st.checkbox("Add a narrator voice (needs internet)", value=False, key="story_voice")
+    visual_cfg = _visual_mode_panel(mode)
     meme_cfg = render_meme_panel("story")
     r1, r2 = st.columns(2)
     with r1:
@@ -1083,7 +1119,7 @@ def _story_step3(folder_id: str, mode: str, wkey: str, wiz: dict) -> None:
             callback, bar = make_progress()
             result = pipeline.run_story_pipeline(
                 wiz["source"], progress=callback, render=True, voice=bool(voice_on), memes=meme_cfg, plan_result=plan,
-                asset_book=book, asset_backend=wiz.get("backend", "draw"), **wiz["common"])
+                asset_book=book, asset_backend=wiz.get("backend", "draw"), **visual_cfg, **wiz["common"])
             st.session_state["story_result"] = result
             _wizard_cleanup(wiz)
             wiz["temp"] = []
@@ -1164,6 +1200,18 @@ def show_story_result(result, mode: str) -> None:
                        "Asset pictures are saved with the project; pick a Drive folder in the sidebar to back them up too.")
             if result.get("conditioning"):
                 st.caption(f"{len(result['conditioning'])} character appearances were drawn from their locked reference pictures.")
+    if result.get("visual_mode"):
+        gen = result.get("generative") or []
+        if result["visual_mode"] == "generative":
+            used = sorted({g["backend"] for g in gen})
+            st.caption(f"Visual style: Generative AI Video - {len(gen)} shot(s) made by {', '.join(used) if used else 'no model (2D fallback)'}.")
+        else:
+            st.caption("Visual style: 2D Cinematic Composition.")
+        timing = result.get("caption_timing") or []
+        if timing:
+            n_w = sum(1 for t in timing if t["source"] == "whisper")
+            st.caption(f"Caption timing: {n_w} of {len(timing)} caption(s) follow measured word timestamps (faster-whisper); "
+                       f"{len(timing) - n_w} estimated.")
     with st.expander("Shot list (episode 1)", expanded=True):
         for s in shots:
             who = ", ".join(s["characters"]) or "-"

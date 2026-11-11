@@ -128,6 +128,84 @@ def transcribe_audio(audio_path: str) -> list:
     return words
 
 
+def _norm(token: str) -> str:
+    import re
+
+    return re.sub(r"[^\w]+", "", str(token).lower().replace("'", "").replace("\u2019", ""))
+
+
+def align_words(text: str, spoken: list, audio_seconds: float = 0.0, min_match: float = 0.5):
+    """Map faster-whisper's spoken words onto the SCRIPT words so captions show the script text but light up exactly
+    when each word is spoken.
+
+    `spoken` = transcribe_audio() output. Script words that whisper heard get its real start/end; words it missed or
+    heard differently are spread over the gap between their neighbours (by length). Returns
+    [{"word","t0","t1","exact"}] for every script word, or None when fewer than `min_match` of the words could be matched
+    (the caller then falls back to length-based estimated timing)."""
+    import difflib
+
+    toks = str(text).split()
+    if not toks or not spoken:
+        return None
+    a = [_norm(t) for t in toks]
+    b = [_norm(w.get("word", "")) for w in spoken]
+    sm = difflib.SequenceMatcher(a=a, b=b, autojunk=False)
+    t0 = [None] * len(toks)
+    t1 = [None] * len(toks)
+    hit = 0
+    for blk in sm.get_matching_blocks():
+        for k in range(blk.size):
+            if not a[blk.a + k]:
+                continue
+            w = spoken[blk.b + k]
+            t0[blk.a + k], t1[blk.a + k] = float(w["start"]), float(w["end"])
+            hit += 1
+    real = sum(1 for x in a if x)
+    if real == 0 or hit / real < min_match:
+        return None
+    end_all = max(float(audio_seconds or 0.0), max(float(w["end"]) for w in spoken))
+    out = []
+    i = 0
+    while i < len(toks):
+        if t0[i] is not None:
+            out.append({"word": toks[i], "t0": t0[i], "t1": t1[i], "exact": True})
+            i += 1
+            continue
+        j = i
+        while j < len(toks) and t0[j] is None:
+            j += 1
+        lo = out[-1]["t1"] if out else 0.0
+        hi = t0[j] if j < len(toks) else end_all
+        hi = max(hi, lo + 0.04 * (j - i))
+        wts = [len(a[k]) + 1.0 for k in range(i, j)]
+        tot = sum(wts)
+        t = lo
+        for k, wt in zip(range(i, j), wts):
+            dt = (hi - lo) * wt / tot
+            out.append({"word": toks[k], "t0": t, "t1": t + dt, "exact": False})
+            t += dt
+        i = j
+    prev = 0.0  # monotonic, no zero-length words
+    for w in out:
+        w["t0"] = max(prev, w["t0"])
+        w["t1"] = max(w["t0"] + 0.03, w["t1"])
+        prev = w["t0"]
+    return out
+
+
+def word_timings(audio_path: str, text: str, transcribe_fn=None, audio_seconds: float = 0.0):
+    """Real word-boundary timing of `text` spoken in `audio_path` (faster-whisper). Returns (words, source) where source
+    is "whisper"; (None, reason) when it could not be done - the caller then estimates. Never raises."""
+    try:
+        spoken = (transcribe_fn or transcribe_audio)(audio_path)
+    except Exception as exc:  # noqa: BLE001 - model missing / not installed / unreadable audio
+        return None, f"speech recognition unavailable ({str(exc)[:90]})"
+    words = align_words(text, spoken, audio_seconds)
+    if words is None:
+        return None, "the recognised words did not match the script"
+    return words, "whisper"
+
+
 if __name__ == "__main__":
     import argparse
     import json

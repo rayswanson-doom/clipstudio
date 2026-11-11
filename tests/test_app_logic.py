@@ -91,6 +91,10 @@ class FakeSt:
         self._log("selectbox", label, key=key, options=list(options))
         return self.inputs.get(key, options[index])
 
+    def radio(self, label, options, index=0, key=None, **k):
+        self._log("radio", label, key=key, options=list(options))
+        return self.inputs.get(key, list(options)[index])
+
     def button(self, label, key=None, **k):
         self._log("button", label, key=key)
         return key in self.clicked
@@ -766,6 +770,37 @@ class WizardTests(unittest.TestCase):
         self.assertEqual(kw["mode"], "script2video")
         self.assertEqual(wiz["step"], 4)
         self.assertEqual(f.session_state["story_result"], res)
+
+    def test_step3_has_a_visual_style_switch_defaulting_to_2d(self):
+        res = {**STORY, "mode": "script2video"}
+        with mock.patch.object(pipeline, "run_story_pipeline", return_value=res) as rs:
+            f, _ = self.app(3, clicked=["wiz_render"], fill=True)
+        radio = f.names("radio")[0]
+        self.assertEqual(radio[2]["key"], "visual_mode_script2video")
+        self.assertEqual(radio[2]["options"], ["2D Cinematic Composition Mode", "Generative AI Video Mode"])
+        kw = rs.call_args[1]
+        self.assertEqual(kw["visual_mode"], "2d")
+        self.assertNotIn("video_backend_script2video", [c[2]["key"] for c in f.names("selectbox")])  # no model picker in 2D mode
+
+    def test_generative_mode_is_passed_to_the_pipeline_with_backend_and_key(self):
+        res = {**STORY, "mode": "script2video"}
+        inputs = {"visual_mode_script2video": "Generative AI Video Mode",
+                  "video_backend_script2video": "pollinations.ai video (API key, mostly paid)",
+                  "video_key_script2video": "  sk-test  "}
+        with mock.patch.object(pipeline, "run_story_pipeline", return_value=res) as rs:
+            f, _ = self.app(3, clicked=["wiz_render"], fill=True, inputs=inputs)
+        kw = rs.call_args[1]
+        self.assertEqual((kw["visual_mode"], kw["video_backend"], kw["video_api_key"]), ("generative", "pollinations", "sk-test"))
+        self.assertIn("video_backend_script2video", [c[2]["key"] for c in f.names("selectbox")])
+        self.assertTrue(any("pollinations" in str(c[1][0]) for c in f.names("markdown")))
+
+    def test_generative_mode_warns_when_no_model_is_ready(self):
+        import generative_video
+
+        none_ready = [{"backend": b, "ready": False, "detail": "not installed"} for b in ("ltx", "svd", "pollinations")]
+        with mock.patch.object(generative_video, "capabilities", return_value=none_ready):
+            f, _ = self.app(3, fill=True, inputs={"visual_mode_script2video": "Generative AI Video Mode"})
+        self.assertTrue(any("fall back to the 2D" in str(c[1][0]) for c in f.names("warning")))
 
     def test_start_over_and_back_buttons(self):
         _, wiz = self.app(2, clicked=["wiz_back1"])

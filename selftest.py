@@ -28,7 +28,7 @@ MODULES = [
     "pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine", "avatar_sync",
     "ocr_engine", "visual_cues", "rapidocr_onnxruntime",
     "avatar_3d_engine", "glb_model", "soft_raster", "lipsync_en", "avatar_gestures", "demo_avatars", "render_engine",
-    "vimax_orchestrator", "novel_adapter", "script_parser", "dependency_graph", "meme_matcher", "asset_manager",
+    "vimax_orchestrator", "novel_adapter", "script_parser", "dependency_graph", "meme_matcher", "asset_manager", "generative_video",
 ]
 
 
@@ -249,6 +249,47 @@ def check_episode_studio() -> str:
     return f"{len(book.cards)} cards, gate held, {len(res['conditioning'])} locked appearances rendered"
 
 
+def check_generative_video() -> str:
+    """Generative-video adapters (a stand-in model, so no GPU / weights / network), the fallback loop and the word-boundary
+    caption alignment."""
+    import numpy as np
+    import types
+    import cv2
+    import generative_video as gv
+    import transcriber
+    import video_engine
+
+    class Pipe:
+        def __call__(self, **kw):
+            from PIL import Image
+
+            frames = []
+            for i in range(kw["num_frames"]):
+                a = np.full((kw["height"], kw["width"], 3), 40, np.uint8)
+                cv2.circle(a, (20 + i * 3, kw["height"] // 2), 12, (255, 255, 0), -1)
+                frames.append(Image.fromarray(a))
+            return types.SimpleNamespace(frames=[frames])
+
+    ff = video_engine.find_ffmpeg()
+    with tempfile.TemporaryDirectory() as d:
+        init = os.path.join(d, "init.png")
+        cv2.imwrite(init, np.full((160, 90, 3), 90, np.uint8))
+        fac = gv.VideoFactory("ltx", pipe_factory=lambda k: Pipe(), ffmpeg=ff)
+        fac.backends[0].check = lambda: None
+        rec = fac.shot_video(0, init, "a cat walks", (90, 160), 1.0, 12, os.path.join(d, "g.mp4"))
+        if not rec or rec["backend"] != "ltx" or os.path.getsize(rec["path"]) < 500:
+            raise RuntimeError(f"generative clip failed: {fac.warnings}")
+        offline = gv.VideoFactory("pollinations", api_key="", probe=lambda: False, ffmpeg=ff)
+        if offline.shot_video(0, init, "p", (90, 160), 1.0, 12, os.path.join(d, "o.mp4")) is not None or not offline.warnings:
+            raise RuntimeError("the offline fallback did not trigger")
+    words = transcriber.align_words("Hello there, world.", [{"word": "hello", "start": 0.1, "end": 0.4},
+                                                            {"word": "there", "start": 0.5, "end": 0.8},
+                                                            {"word": "world", "start": 1.0, "end": 1.4}])
+    if not words or not all(w["exact"] for w in words) or abs(words[2]["t0"] - 1.0) > 1e-6:
+        raise RuntimeError("word alignment failed")
+    return "stand-in model clip written, offline fallback works, 3 words aligned to spoken times"
+
+
 def check_story() -> str:
     """Story Studio on the CPU: screenplay -> agents -> consistency graph -> 2-shot animatic (no network, no GPU)."""
     import vimax_orchestrator as vo
@@ -372,6 +413,7 @@ def run_all(app_path: Optional[Path] = None, log: Callable[[str], None] = print)
         ("story studio (agents + consistency graph)", "fail", check_story),
         ("auto-meme reactions", "fail", check_memes),
         ("episode studio (asset gate + scene renderer)", "fail", check_episode_studio),
+        ("generative video (adapters + fallback + word timing)", "fail", check_generative_video),
         ("on-screen text (OCR)", "fail", check_ocr),
         ("visual action cues", "fail", check_cues),
         ("app page", "fail", lambda: check_app_page(app_path)),

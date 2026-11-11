@@ -34,8 +34,8 @@ Time: ~15 min of your clicking + 30-60 min of waiting. Needs only a web browser.
    the models, builds with PyInstaller, then **starts the finished exe and checks it answers**
    (the smoke test) before saving anything.
 6. **Download**: when the run is green, scroll to **Artifacts** at the bottom of the run page ->
-   click **CinePulseAI-EpisodeStudio-Portable**. GitHub wraps it once more, so you unzip twice:
-   download -> unzip -> inside is `CinePulseAI-EpisodeStudio-Portable.zip` -> unzip that -> folder `CinePulseAI`.
+   click **CinePulseAI-Generative-Portable**. GitHub wraps it once more, so you unzip twice:
+   download -> unzip -> inside is `CinePulseAI-Generative-Portable.zip` -> unzip that -> folder `CinePulseAI`.
 7. **Run**: open the `CinePulseAI` folder, double-click **CinePulseAI.exe**. Wait 10-40 seconds on
    first start; your browser opens the app. If Windows SmartScreen warns about an unknown publisher:
    *More info -> Run anyway* (it is your own program).
@@ -84,7 +84,7 @@ Needs a PC that can handle ~5 GB of downloads and a long build.
 3. Preview the build (changes nothing):  `python build_exe.py --dry-run`
 4. Build:  `python build_exe.py`
    It downloads `ffmpeg.exe`, the face model and the Whisper model automatically if missing, then writes
-   `dist\CinePulseAI\` and `dist\CinePulseAI-EpisodeStudio-Portable.zip`.
+   `dist\CinePulseAI\` and `dist\CinePulseAI-Generative-Portable.zip`.
    - Use `--no-token` to leave `token.json` out. `--no-download` stops all downloads (you must then
      supply `bin\ffmpeg.exe` yourself).
 5. Run `dist\CinePulseAI\CinePulseAI.exe` (or send the zip to any Windows laptop).
@@ -193,4 +193,20 @@ The story modes are a 3-step wizard:
 2. **Asset studio** - one prompt card per character (hair, eyes, build, attire, emotional role) and per location (setting, lighting, atmosphere). Upload a full-length character picture and a background picture for each card, or press **Generate Reference Visuals**: a free key-less online generator (pollinations.ai, needs internet) -> a local CPU diffusers model (only if you installed `diffusers` + `torch`) -> the built-in offline painter (simple flat art). Rendering stays locked until every card has a picture.
 3. **Render episode** - storyboard preview with the locked pictures, then the render. `dependency_graph` links every shot to its character and location reference (`bind_assets`, `enforce_locks`, `reference_manifest`) and the renderer draws only from those files, so a character looks the same in every cut. Each shot = scenery plate with a programmatic camera move (pan / tilt / push / pull / hand-held), cut-out characters (OpenCV GrabCut, or `rembg` if installed) that slide in/out and bob while they talk, kinetic captions timed to the voice, and the optional host corner avatar / meme reactions. Character sheets, location pictures, `assets.json` and the episode are backed up to the Google Drive folder.
 
-Honest limits: the scenes are 2D compositions (picture + cut-out + camera moves), not AI-generated video; caption word timing is spread by word length, not read from the speech engine; the built-in painter makes simple illustrations - upload or generate real pictures for a richer look.
+### Generative AI Video Mode vs 2D Cinematic Composition Mode
+
+Step 3 has a **Visual style** switch.
+
+- **2D Cinematic Composition Mode** (default, runs anywhere): locked scenery + cut-out characters + camera moves.
+- **Generative AI Video Mode** (`backend/generative_video.py`): each shot's locked first frame (scenery + character reference pictures) is animated by a video model. Tried in order, per shot, with fallback: local **LTX-Video** (diffusers `LTXImageToVideoPipeline`), local **Stable Video Diffusion** (`StableVideoDiffusionPipeline`), then **pollinations.ai** video (`gen.pollinations.ai/image/{prompt}?model=...`, needs an API key, most video models are paid, text-to-video so the reference pictures are NOT fed to it). A backend that is missing or fails (no GPU, no weights, no key, no internet) is marked down for the rest of the episode and that shot is rendered in 2D; the result lists the reason.
+- LTX-Video / SVD need the optional packages `diffusers` + `torch`, a CUDA GPU and the downloaded weights (several GB; nothing is downloaded automatically). The Windows build bundles CPU PyTorch only, so inside the packaged exe those two report "no CUDA GPU" unless you build with a GPU torch + diffusers (`python build_exe.py --with-torch`). Check readiness any time: the app lists each backend's status when the mode is selected.
+
+### Caption timing
+
+Kinetic captions use real word boundaries: the voiceover is transcribed with faster-whisper (`transcriber.word_timings`), the spoken words are aligned to the script words (`align_words`; words whisper missed are interpolated between their neighbours) and the highlight follows them. If faster-whisper or its model is unavailable, or the recognised words do not match the script, the captions fall back to length-based estimated timing and the result says so.
+
+### Google Drive checks
+
+`python backend/uploader.py --check [--folder-id ID]` runs a live read-only check (files -> network -> sign-in -> API -> folder). Offline refreshes raise a clear offline error (no browser opens), a revoked token tells you to sign in again, a 401 mid-upload refreshes the token and retries once, and a corrupted `token.json` is set aside as `token.json.bad`.
+
+Honest limits: the 2D mode is a composition, not AI video; the painter's pictures are simple flat art; generative clips are only as consistent as the video model; the online picture generator, the model adapters and Drive were verified with stand-ins in tests, not against the live services.

@@ -1065,19 +1065,26 @@ def _actor_drift(clip: str, comp, cutout_path: str, name: str, t: float) -> Opti
 
 
 def _render_scenic(result: dict, output_path: str, assets, work_dir: Optional[str], size, fps, voice, voice_name, max_shots,
-                   ffmpeg_path, progress, host, drift_threshold: float = 0.35) -> dict:
+                   ffmpeg_path, progress, host, drift_threshold: float = 0.35, visual_mode: str = "2d", video_factory=None,
+                   word_timer: Optional[Callable] = None) -> dict:
     """Every shot is composed from the locked reference pictures: scenery plate (camera move) -> cut-out characters
     (entry / exit slides, talking bob) -> kinetic captions synchronised to the voice -> optional host corner."""
     import cv2
     import tempfile
 
     try:
+        from . import generative_video as gv
         from . import render_engine as re_
+        from . import transcriber as tr
         from . import video_engine as ve
     except ImportError:  # pragma: no cover
+        import generative_video as gv
         import render_engine as re_
+        import transcriber as tr
         import video_engine as ve
 
+    if visual_mode not in gv.MODES:
+        raise ValueError(f"visual_mode must be one of: {', '.join(gv.MODES)}.")
     am.require_ready(assets)  # the gate
     shots = list(result["storyboard"]["shots"])[: max_shots or None]
     if not shots:
@@ -1137,6 +1144,11 @@ def _render_scenic(result: dict, output_path: str, assets, work_dir: Optional[st
     scene_first = {}
     for sh in shots:
         scene_first.setdefault(sh.get("scene_idx", 0), sh["idx"])
+    generative = visual_mode == "generative"
+    factory = (video_factory or gv.VideoFactory("auto", ffmpeg=ff)) if generative else None
+    gen_report: List[dict] = []
+    timing: List[dict] = []
+    timer = word_timer or tr.word_timings
     tts = None
     if voice:
         try:
@@ -1167,38 +1179,82 @@ def _render_scenic(result: dict, output_path: str, assets, work_dir: Optional[st
                 warnings.append(f"Voice for shot {s['idx']} failed ({str(exc)[:80]}); that shot is silent.")
                 audio = None
         man = dg.reference_manifest(graph, store, s["idx"])
-        comp = re_.Composition(size, fps, duration=dur, ffmpeg_path=ff)
-        if audio:
-            comp.add_audio(audio, role="voiceover")
         scene = s.get("scene_idx", 0)
-        comp.add_scenery(man["location"], 0.0, None, re_.camera_for_shot(s, seed=s["idx"]),
-                         fade=0.35 if s["idx"] == scene_first.get(scene) else 0.0)
         h_frac, foot = _framing(s)
         vis = [c for c in s.get("characters", []) if c in cutout][:3]
         if len(vis) > 1:
             h_frac = min(h_frac * 0.92, 0.64)  # two people share the frame: step back so they do not overlap
         speak_end = max(0.4, dur - 0.1)
         for c in vis:
-            ref = man["characters"].get(c)
-            if not ref:
+            if not man["characters"].get(c):
                 raise dg.GraphError(f"Shot {s['idx']} has no reference picture bound for {c}.")
-            x = slots[scene].get(c, 0.5)
-            ids = stay[(scene, c)]
-            entry = ("left" if x < 0.5 else "right") if s["idx"] == ids[0] and s["idx"] != scene_first.get(scene) else None
-            leaves = s["idx"] == ids[-1] and s["idx"] != scene_last.get(scene)
-            comp.add_actor(cutout[c], 0.0, None, x=x, x_to=x + (0.015 if x < 0.5 else -0.015), foot_y=foot, height=h_frac,
-                           entry=entry, exit=(("left" if x < 0.5 else "right") if leaves else None),
-                           speaking=([(0.05, speak_end)] if (s.get("speaker") == c and s.get("line")) else []), name=c)
+
+        def add_actors(cmp, static: bool, s=s, vis=vis, scene=scene, h_frac=h_frac, foot=foot, speak_end=speak_end):
+            for c in vis:
+                x = slots[scene].get(c, 0.5)
+                ids = stay[(scene, c)]
+                entry = None if static else (("left" if x < 0.5 else "right") if s["idx"] == ids[0] and s["idx"] != scene_first.get(scene) else None)
+                leaves = (not static) and s["idx"] == ids[-1] and s["idx"] != scene_last.get(scene)
+                cmp.add_actor(cutout[c], 0.0, None, x=x, x_to=x if static else x + (0.015 if x < 0.5 else -0.015), foot_y=foot,
+                              height=h_frac, entry=entry, exit=(("left" if x < 0.5 else "right") if leaves else None),
+                              speaking=([] if static else ([(0.05, speak_end)] if (s.get("speaker") == c and s.get("line")) else [])),
+                              name=c)
+
+        gen = None
+        if generative and factory.usable:
+            lock = re_.Composition(size, fps, duration=0.5, ffmpeg_path=ff)  # the shot's locked first frame
+            lock.add_scenery(man["location"], 0.0, None, None)
+            add_actors(lock, static=True)
+            lock_clip = str(work / f"lock_{s['idx']:03d}.mp4")
+            lock.render(lock_clip)
+            init = _last_frame(lock_clip, str(work / f"lock_{s['idx']:03d}.png"))
+            loc_card = next((c for c in assets.locations if c.get("key") == s.get("location_key") or c["name"] == s.get("location")), None)
+            chars = [c for c in assets.characters if c["name"] in vis]
+            prompt = gv.build_motion_prompt(s, loc_card, chars)
+            say(0.06 + 0.84 * n / len(shots), f"Generating video for shot {s['idx'] + 1} of {len(shots)}")
+            gen = factory.shot_video(s["idx"], init, prompt, size, dur, fps, str(work / f"gen_{s['idx']:03d}.mp4"),
+                                     seed=zlib.crc32(f"{s['idx']}:{scene}".encode()) % 100000)
+            if gen:
+                gen["init_frame"] = init
+                gen["init_sha1"] = am.file_sha1(init)
+                gen["prompt"] = prompt
+                gen_report.append(gen)
+                if not gen["image_conditioned"]:
+                    warnings.append(f"Shot {s['idx']}: {gen['backend']} is text-to-video, so this shot is not conditioned on the "
+                                    "reference pictures (character / background consistency is not enforced).")
+        comp = re_.Composition(size, fps, duration=dur, ffmpeg_path=ff)
+        if audio:
+            comp.add_audio(audio, role="voiceover")
+        if gen:
+            comp.add_generated_video(gen["path"], 0.0, None, backend=gen["backend"], includes_actors=True,
+                                     fade=0.35 if s["idx"] == scene_first.get(scene) else 0.0)
+        else:
+            comp.add_scenery(man["location"], 0.0, None, re_.camera_for_shot(s, seed=s["idx"]),
+                             fade=0.35 if s["idx"] == scene_first.get(scene) else 0.0)
+            add_actors(comp, static=False)
+        for c in vis:
+            ref = man["characters"].get(c)
             conditioning.append({"shot": s["idx"], "character": c, "reference": ref, "reference_sha1": am.file_sha1(ref),
-                                 "cutout": cutout[c], "location": man["location"]})
+                                 "cutout": cutout[c], "location": man["location"],
+                                 "visual": gen["backend"] if gen else "2d"})
         if host_path:
             comp.add_avatar(host_path, 0.0, dur, host_pos, host_xy, host_scale, animation="none")
         if s["kind"] == "establishing" or s["idx"] == 0:
             comp.add_text(f"{s['int_ext']}. {s['location']} - {s['time_of_day'] or 'DAY'}".strip(" -"), 0.0, min(dur, 2.4),
                          "center" if host_top else "top", "fade")
         if s.get("line"):
+            wt, src = (None, "no voice")
+            if audio:
+                wt, src = timer(audio, s["line"], audio_seconds=float(length))
+            if wt:
+                wt = [{"word": w["word"], "t0": w["t0"], "t1": min(w["t1"], dur - 0.02)} for w in wt if w["t0"] < dur - 0.05]
             comp.add_kinetic_caption(f"{s['line']}", 0.05, max(0.4, dur - 0.05), caption_pos,
-                                     font_px=max(16, int(size[0] * 0.05)))
+                                     font_px=max(16, int(size[0] * 0.05)), word_times=wt or None)
+            timing.append({"shot": s["idx"], "source": "whisper" if wt else "estimated", "detail": "" if wt else src})
+            if not wt and audio:
+                msg = f"Caption timing is estimated (not measured) in shot {s['idx']}: {src}."
+                if msg not in warnings:
+                    warnings.append(msg)
         elif s.get("action") and s["kind"] != "establishing":
             comp.add_text(s["action"][:110], 0.0, dur, "center" if not host_top else "bottom", "fade", font_px=max(15, int(size[0] * 0.034)))
         clip = str(work / f"shot_{s['idx']:03d}.mp4")
@@ -1208,11 +1264,17 @@ def _render_scenic(result: dict, output_path: str, assets, work_dir: Optional[st
         store.put(f"kf:{s['idx']}:last", kf)
         clips[s["idx"]] = (clip, dur)
         t_mid = min(max(0.2, dur - 0.3), max(0.9, dur * 0.5))  # after the entry slide, before the exit
-        for c in vis:
+        for c in ([] if gen else vis):
             dist = _actor_drift(clip, comp, cutout[c], c, t_mid)
             if dist is not None:
                 observed.append({"shot": s["idx"], "character": c, "distance": round(dist, 4),
                                  "status": "ok" if dist <= drift_threshold else "drift"})
+    if generative:
+        warnings.extend(w for w in factory.warnings if w not in warnings)
+        if not gen_report:
+            warnings.append("Generative video was not available for any shot, so the 2D cinematic composition was rendered.")
+        elif len(gen_report) < len(shots):
+            warnings.append(f"Generative video was made for {len(gen_report)} of {len(shots)} shots; the others use the 2D composition.")
     say(0.92, "Joining the shots")
     ve.join_clips([clips[s["idx"]][0] for s in shots], output_path, ffmpeg_path=ff)
     say(1.0, "Done")
@@ -1221,6 +1283,7 @@ def _render_scenic(result: dict, output_path: str, assets, work_dir: Optional[st
             "shots": [{"idx": s["idx"], "clip": clips[s["idx"]][0], "seconds": clips[s["idx"]][1]} for s in shots],
             "drift": sorted(observed, key=lambda r: -r["distance"]), "conditioning": conditioning, "locks": dg.lock_check(graph, store, shots),
             "keyframes": dict(store.paths), "portraits": dict(cutout), "warnings": warnings, "voice_used": voice_used,
+            "visual_mode": visual_mode, "generative": gen_report, "caption_timing": timing,
             "host": None if not host_path else {"image": host_path, "position": host_pos, "scale": host_scale}}
 
 
@@ -1228,8 +1291,14 @@ def render_storyboard(result: dict, output_path: str, work_dir: Optional[str] = 
                       fps: int = 20, voice: bool = False, voice_name: str = "en-US-AriaNeural", max_shots: Optional[int] = None,
                       ffmpeg_path: Optional[str] = None, progress: Optional[Callable[[float, str], None]] = None,
                       drift_threshold: float = 0.35, use_portraits: bool = True, continuity: bool = True,
-                      host: Optional[dict] = None, assets=None) -> dict:
-    """Render the storyboard on the CPU.
+                      host: Optional[dict] = None, assets=None, visual_mode: str = "2d", video_factory=None,
+                      word_timer: Optional[Callable] = None) -> dict:
+    """Render the storyboard on the CPU (visual_mode="generative": with a video model where one is available).
+
+    visual_mode "2d" = 2D cinematic composition; "generative" = each shot is a clip made by a video model
+    (generative_video.VideoFactory: LTX-Video / Stable Video Diffusion / pollinations.ai) animating the shot's locked
+    first frame, with a per-shot fallback to the 2D composition when no model can run. `word_timer(audio, text, ...)` ->
+    (words, source) times the kinetic captions (default: faster-whisper word timestamps, estimated when unavailable).
 
     With `assets` (an asset_manager.AssetBook whose cards all have pictures - the output of the Pre-Production Asset
     Gate) the SCENIC renderer is used: each shot is composed from the location's background plate and the characters'
@@ -1257,7 +1326,8 @@ def render_storyboard(result: dict, output_path: str, work_dir: Optional[str] = 
 
     if assets is not None:
         return _render_scenic(result, output_path, assets, work_dir, tuple(size), fps, voice, voice_name, max_shots,
-                              ffmpeg_path, progress, host, drift_threshold)
+                              ffmpeg_path, progress, host, drift_threshold, visual_mode=visual_mode,
+                              video_factory=video_factory, word_timer=word_timer)
     shots = list(result["storyboard"]["shots"])[: max_shots or None]
     if not shots:
         raise ValueError("The storyboard has no shots.")

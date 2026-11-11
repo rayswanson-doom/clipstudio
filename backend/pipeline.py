@@ -593,6 +593,18 @@ def run_viewmax_pipeline(
         release_memory(not keep_models)
 
 
+def _make_video_factory(backend: str, ffmpeg_path: Optional[str], api_key: Optional[str] = None):
+    try:
+        from . import generative_video as gv
+    except ImportError:  # pragma: no cover
+        import generative_video as gv
+    try:
+        from . import video_engine as _ve
+    except ImportError:  # pragma: no cover
+        import video_engine as _ve
+    return gv.VideoFactory(backend, api_key=api_key, ffmpeg=_ve.find_ffmpeg(ffmpeg_path))
+
+
 def run_story_pipeline(
     source: str,
     mode: str = "script2video",
@@ -624,6 +636,11 @@ def run_story_pipeline(
     asset_book=None,
     asset_backend: str = "draw",
     image_transport=None,
+    visual_mode: str = "2d",
+    video_backend: str = "auto",
+    video_factory=None,
+    word_timer=None,
+    video_api_key: Optional[str] = None,
 ) -> dict:
     """Idea / screenplay / novel -> multi-shot storyboard (+ CPU animatic) -> Google Drive, on any computer (no GPU).
 
@@ -737,6 +754,8 @@ def run_story_pipeline(
                     result, str(out_dir / f"{name}.mp4"), work_dir=str(project_dir / "work"), size=tuple(size), fps=fps,
                     voice=voice, voice_name=voice_name, ffmpeg_path=ffmpeg_path, drift_threshold=drift_threshold,
                     use_portraits=use_portraits, continuity=continuity, host=host_avatar, assets=book,
+                    visual_mode=visual_mode, word_timer=word_timer,
+                    video_factory=video_factory or (_make_video_factory(video_backend, ffmpeg_path, video_api_key) if visual_mode == "generative" else None),
                     progress=lambda f, m: prog(m, 0.42 + 0.46 * f))
                 video_path, drift = rr["output_path"], rr["drift"]
                 ep_warn.extend(w for w in rr["warnings"] if w not in ep_warn)
@@ -789,6 +808,8 @@ def run_story_pipeline(
                     drive_links.append(drive_link)
         result.update({"project_dir": str(project_dir), "video_path": video_path, "drift": drift,
                        "frame_size": list(size), "asset_links": asset_links, "conditioning": rr.get("conditioning", []),
+                       "visual_mode": rr.get("visual_mode", visual_mode), "generative": rr.get("generative", []),
+                       "caption_timing": rr.get("caption_timing", []),
                        "assets": {"dir": str(assets_dir), **book.summary()},
                        "drive_link": drive_link, "project_link": project_link, "rendered": bool(video_path),
                        "memes": _meme_summary(meme_applied)})

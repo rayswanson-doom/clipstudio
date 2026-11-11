@@ -2,7 +2,7 @@ name: Build Windows exe
 
 # Run it by hand: Actions tab -> "Build Windows exe" -> Run workflow.
 # It builds on a free GitHub Windows machine, starts the finished exe to prove it
-# boots, and publishes CinePulseAI-EpisodeStudio-Portable.zip (validated, then unzipped and tested exactly as a user would use it).
+# boots, and publishes CinePulseAI-Generative-Portable.zip (validated, then unzipped and tested exactly as a user would use it).
 on:
   workflow_dispatch:
     inputs:
@@ -64,10 +64,10 @@ jobs:
       - name: Unzip the FINAL zip into a clean folder (this is what the user receives)
         shell: pwsh
         run: |
-          python build_exe.py --validate-zip dist\CinePulseAI-EpisodeStudio-Portable.zip
+          python build_exe.py --validate-zip dist\CinePulseAI-Generative-Portable.zip
           $pkg = Join-Path $env:RUNNER_TEMP "pkg"
           New-Item -ItemType Directory -Force $pkg | Out-Null
-          tar -xf dist\CinePulseAI-EpisodeStudio-Portable.zip -C $pkg
+          tar -xf dist\CinePulseAI-Generative-Portable.zip -C $pkg
           if (-not (Test-Path "$pkg\CinePulseAI\CinePulseAI.exe")) { throw "CinePulseAI.exe missing after unzip" }
           Get-ChildItem "$pkg\CinePulseAI" | Select-Object Name | Format-Table -HideTableHeaders
 
@@ -100,8 +100,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         continue-on-error: true  # a full artifact quota must not block the release below
         with:
-          name: CinePulseAI-EpisodeStudio-Portable
-          path: dist/CinePulseAI-EpisodeStudio-Portable.zip
+          name: CinePulseAI-Generative-Portable
+          path: dist/CinePulseAI-Generative-Portable.zip
           retention-days: 14
           compression-level: 0
 
@@ -111,4 +111,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "build-$env:GITHUB_RUN_NUMBER"
-          gh release create $tag "dist/CinePulseAI-EpisodeStudio-Portable.zip" --repo $env:GITHUB_REPOSITORY --title "CinePulse AI build $env:GITHUB_RUN_NUMBER" --notes "Windows build. Download CinePulseAI-EpisodeStudio-Portable.zip, unzip it, double-click CinePulseAI.exe inside the CinePulseAI folder. No installation and no internet needed for the core features."
+          gh release create $tag "dist/CinePulseAI-Generative-Portable.zip" --repo $env:GITHUB_REPOSITORY --title "CinePulse AI build $env:GITHUB_RUN_NUMBER" --notes "Windows build. Download CinePulseAI-Generative-Portable.zip, unzip it, double-click CinePulseAI.exe inside the CinePulseAI folder. No installation and no internet needed for the core features."

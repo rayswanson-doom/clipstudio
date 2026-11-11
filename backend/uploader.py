@@ -143,6 +143,31 @@ def download_media(source: str, output_dir: Optional[str] = None) -> str:
 # --------------------------------------------------------------------------- #
 # 2. Google Drive auth + upload
 # --------------------------------------------------------------------------- #
+class DriveAuthError(RuntimeError):
+    """Google Drive sign-in is unusable (revoked / expired token, no client file) - the message says what to do."""
+
+
+class DriveOfflineError(ConnectionError):
+    """Google cannot be reached (no internet); the work stays local and the upload can be retried later."""
+
+
+def _google_reachable(timeout: float = 4.0) -> bool:
+    import socket
+
+    try:
+        with socket.create_connection(("oauth2.googleapis.com", 443), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _is_network_error(exc: BaseException) -> bool:
+    if isinstance(exc, (ConnectionError, TimeoutError, OSError)) and not isinstance(exc, (FileNotFoundError, PermissionError)):
+        return True
+    return type(exc).__name__ in {"TransportError", "ServerNotFoundError", "ConnectTimeout", "ReadTimeout", "SSLError",
+                                  "RemoteDisconnected", "ConnectionError", "timeout"}
+
+
 def drive_status() -> str:
     """Cheap, offline check of what Google files exist. Never raises.
 
@@ -157,43 +182,67 @@ def drive_status() -> str:
     return "unavailable"
 
 
-def get_credentials():
-    """Load credentials from token.json, refreshing via the offline refresh
-    token when expired. Runs the one-time browser consent only if no usable
-    token exists. Writes the refreshed token back to token.json."""
+def get_credentials(reachable: Optional[Callable[[], bool]] = None):
+    """Load credentials from token.json, refreshing via the offline refresh token when expired. Runs the one-time
+    browser consent only if no usable token exists. Writes the refreshed token back to token.json.
+
+    Failure handling (never a silent hang):
+      - no internet while refreshing        -> DriveOfflineError (no browser is opened; retry when online)
+      - refresh token revoked / expired     -> sign in again if credentials.json exists, else DriveAuthError
+      - token.json unreadable / corrupted   -> treated as signed out (the file is kept as token.json.bad)
+    """
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
 
     creds = None
     if TOKEN_FILE.is_file():
-        # No scopes passed: use the ones stored in token.json, so a token created
-        # with --full-access keeps working without any environment variable.
-        creds = Credentials.from_authorized_user_file(str(TOKEN_FILE))
+        try:
+            # No scopes passed: use the ones stored in token.json, so a token created
+            # with --full-access keeps working without any environment variable.
+            creds = Credentials.from_authorized_user_file(str(TOKEN_FILE))
+        except (ValueError, KeyError, OSError) as exc:
+            logger.warning("token.json could not be read (%s); signing in again.", exc)
+            try:
+                TOKEN_FILE.replace(TOKEN_FILE.with_name(TOKEN_FILE.name + ".bad"))
+            except OSError:
+                pass
+            creds = None
 
     if creds and creds.valid:
         return creds
 
     if creds and creds.expired and creds.refresh_token:
+        if not (reachable or _google_reachable)():
+            raise DriveOfflineError("Google Drive cannot be reached (no internet). The file stays on this computer; "
+                                    "upload it again when you are online.")
         try:
             creds.refresh(Request())
             _save_token(creds)
             return creds
         except Exception as exc:
+            if _is_network_error(exc):
+                raise DriveOfflineError(f"Google Drive could not be reached while refreshing the sign-in ({str(exc)[:100]}). "
+                                        "Try again when the connection is back.") from None
             logger.warning("Token refresh failed (%s); re-authorizing.", exc)
             creds = None
+            if not CREDENTIALS_FILE.is_file():
+                raise DriveAuthError("Google Drive access was revoked or has expired and there is no credentials.json to "
+                                     "sign in again. Download credentials.json (Desktop app) and run the sign-in once more.") from None
 
     if not CREDENTIALS_FILE.is_file():
         raise FileNotFoundError(
             f"No valid token.json and no OAuth client file at {CREDENTIALS_FILE}. "
             "Download credentials.json (Desktop app) from Google Cloud Console."
         )
+    if not (reachable or _google_reachable)():
+        raise DriveOfflineError("Google sign-in needs an internet connection; none was found.")
 
     from google_auth_oauthlib.flow import InstalledAppFlow
 
     flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_FILE), SCOPES)
     # access_type=offline + prompt=consent guarantees a refresh token is issued.
     creds = flow.run_local_server(
-        port=0, access_type="offline", prompt="consent", open_browser=True
+        port=0, access_type="offline", prompt="consent", open_browser=True, timeout_seconds=300
     )
     _save_token(creds)
     return creds
@@ -229,27 +278,79 @@ def upload_to_google_drive(file_path: str, folder_id: str) -> str:
         raise ValueError("folder_id must be a non-empty Google Drive folder ID")
 
     mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-    service = get_drive_service()
-
     metadata = {"name": path.name, "parents": [folder_id.strip()]}
-    media = MediaFileUpload(
-        str(path), mimetype=mime_type, resumable=True, chunksize=8 * 1024 * 1024
-    )
-    request = service.files().create(
-        body=metadata, media_body=media, fields="id, webViewLink"
-    )
-
     response = None
-    while response is None:
-        status, response = request.next_chunk(num_retries=3)
-        if status:
-            logger.info("Upload %s: %d%%", path.name, int(status.progress() * 100))
+    for auth_try in (1, 2):
+        service = get_drive_service()
+        media = MediaFileUpload(
+            str(path), mimetype=mime_type, resumable=True, chunksize=8 * 1024 * 1024
+        )
+        request = service.files().create(
+            body=metadata, media_body=media, fields="id, webViewLink"
+        )
+        try:
+            response = None
+            while response is None:
+                status, response = request.next_chunk(num_retries=3)
+                if status:
+                    logger.info("Upload %s: %d%%", path.name, int(status.progress() * 100))
+            break
+        except Exception as exc:
+            code = getattr(getattr(exc, "resp", None), "status", None)
+            if code == 401 and auth_try == 1:  # the access token died mid-upload: refresh and start the upload again
+                logger.warning("Drive rejected the access token (401); refreshing and retrying once.")
+                try:
+                    creds = get_credentials()
+                    if getattr(creds, "refresh_token", None):
+                        from google.auth.transport.requests import Request
+
+                        creds.refresh(Request())
+                        _save_token(creds)
+                except Exception as exc2:  # noqa: BLE001
+                    raise DriveAuthError(f"Google Drive rejected the sign-in and it could not be refreshed ({str(exc2)[:100]}).") from None
+                continue
+            if code in (401, 403) and "rate" not in str(exc).lower() and "quota" not in str(exc).lower():
+                raise DriveAuthError(f"Google Drive refused the upload (HTTP {code}). Check that the folder ID is right and that this "
+                                     "account may add files to it.") from None
+            if _is_network_error(exc) and not isinstance(exc, DriveOfflineError):
+                raise DriveOfflineError(f"The upload was interrupted: Google Drive could not be reached ({str(exc)[:100]}).") from None
+            raise
 
     link = response.get("webViewLink") or (
         f"https://drive.google.com/file/d/{response['id']}/view"
     )
     logger.info("Uploaded %s -> %s", path.name, link)
     return link
+
+
+def drive_live_check(folder_id: str = "", service_factory: Optional[Callable] = None,
+                     reachable: Optional[Callable[[], bool]] = None) -> dict:
+    """A live, read-only check of Google Drive: {"ok": bool, "stage": str, "detail": str}. Never raises.
+    stages: files (no token / credentials) -> network -> auth (token loads / refreshes) -> api (account) -> folder."""
+    st = drive_status()
+    if st == "unavailable":
+        return {"ok": False, "stage": "files", "detail": "No token.json or credentials.json: Drive backup is off."}
+    if not (reachable or _google_reachable)():
+        return {"ok": False, "stage": "network", "detail": "No internet connection to Google."}
+    try:
+        service = (service_factory or get_drive_service)()
+    except DriveAuthError as exc:
+        return {"ok": False, "stage": "auth", "detail": str(exc)}
+    except DriveOfflineError as exc:
+        return {"ok": False, "stage": "network", "detail": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "stage": "auth", "detail": f"Sign-in failed: {str(exc)[:160]}"}
+    try:
+        about = service.about().get(fields="user(emailAddress)").execute()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "stage": "api", "detail": f"Drive API call failed: {str(exc)[:160]}"}
+    if folder_id.strip():
+        try:
+            service.files().get(fileId=folder_id.strip(), fields="id,name", supportsAllDrives=True).execute()
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "stage": "folder", "detail": f"The folder could not be opened ({str(exc)[:120]})."}
+    who = ((about or {}).get("user") or {}).get("emailAddress", "")
+    return {"ok": True, "stage": "folder" if folder_id.strip() else "api", "detail": f"Connected{(' as ' + who) if who else ''}."}
 
 
 # --------------------------------------------------------------------------- #
@@ -262,7 +363,7 @@ def is_transient_error(exc: BaseException) -> bool:
     """True for temporary problems worth retrying (flaky network, Drive 5xx / rate limit).
     False for things a retry cannot fix: missing files, missing credentials, bad arguments,
     permission or not-found errors."""
-    if isinstance(exc, (FileNotFoundError, PermissionError, ValueError, KeyboardInterrupt)):
+    if isinstance(exc, (FileNotFoundError, PermissionError, ValueError, KeyboardInterrupt, DriveAuthError)):
         return False
     status = getattr(getattr(exc, "resp", None), "status", None)  # googleapiclient HttpError
     if status is not None:
@@ -426,6 +527,7 @@ def _main() -> None:
     parser.add_argument("--full-access", action="store_true",
                         help="sign in with full Drive access (needed to upload into a folder "
                              "you created by hand if the default scope gives 'File not found')")
+    parser.add_argument("--check", action="store_true", help="live check of Google Drive sign-in, network and folder access")
     parser.add_argument("--source", help="YouTube URL or local file path")
     parser.add_argument("--folder-id", help="Google Drive folder ID to upload into")
     args = parser.parse_args()
@@ -435,6 +537,10 @@ def _main() -> None:
         SCOPES = [FULL_SCOPE]
         if TOKEN_FILE.is_file():  # an old narrower token must not be reused
             TOKEN_FILE.unlink()
+    if args.check:
+        res = drive_live_check(args.folder_id or "")
+        print(f"[{'OK' if res['ok'] else 'FAIL'}] {res['stage']}: {res['detail']}")
+        sys.exit(0 if res["ok"] else 1)
     if args.auth:
         get_credentials()
         print(f"Authorized. Token saved to {TOKEN_FILE}")

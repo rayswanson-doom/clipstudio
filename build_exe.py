@@ -2,7 +2,7 @@
 build_exe.py  -  build the CinePulse AI Windows distribution with PyInstaller.
 
     python build_exe.py --dry-run     # scan + show the PyInstaller arguments, build nothing
-    python build_exe.py               # build dist/CinePulseAI/ and dist/CinePulseAI-EpisodeStudio-Portable.zip
+    python build_exe.py               # build dist/CinePulseAI/ and dist/CinePulseAI-Generative-Portable.zip
     python build_exe.py --ci          # same, for an unattended CI machine
     python build_exe.py --git-push    # ...then `git add .`, `git commit`, `git push origin main`
     python build_exe.py --git-only    # only the git step (no build)
@@ -47,9 +47,9 @@ from typing import List, Optional
 import build  # shared constants, preflight scan and helpers
 
 ROOT = Path(__file__).resolve().parent
-ZIP_NAME = "CinePulseAI-EpisodeStudio-Portable.zip"
-COMMIT_MESSAGE = ("feat: implement interactive character/scenery asset prompting gate, full visual scene animation "
-                  "engine, and ViMax multi-shot rendering")
+ZIP_NAME = "CinePulseAI-Generative-Portable.zip"
+COMMIT_MESSAGE = ("feat: upgrade to generative AI video rendering via LTX-Video/Stability patterns, fix word-boundary "
+                  "captions, resolve test_uploader, and update build package")
 COMMIT_TRAILERS = (
     "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>",
     "Claude-Session: https://claude.ai/code/session_01DZZzH74mQWkTiSWum5df7Q",
