@@ -5,7 +5,7 @@ Proves the build actually works, not just that a web server starts: every
 bundled library imports, ffmpeg runs, the face model and the Whisper model
 load, a real clip is cropped and encoded, and the Streamlit page renders.
 Output goes to cinepulseai.log (the exe has no console); exit code 0 = all good.
-Online-only features (edge-tts) are reported as warnings, never failures.
+Network-only features are never exercised here, so the self-test needs no internet.
 """
 
 from __future__ import annotations
@@ -24,11 +24,9 @@ Result = Tuple[str, str, str]  # (name, "ok" | "warn" | "fail", detail)
 MODULES = [
     "streamlit", "cv2", "numpy", "mediapipe", "mediapipe.tasks.python.vision",
     "faster_whisper", "ctranslate2", "googleapiclient.discovery", "googleapiclient.http",
-    "google_auth_oauthlib.flow", "google.oauth2.credentials", "yt_dlp", "edge_tts",
-    "pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine", "avatar_sync",
-    "ocr_engine", "visual_cues", "rapidocr_onnxruntime",
-    "avatar_3d_engine", "glb_model", "soft_raster", "lipsync_en", "avatar_gestures", "demo_avatars", "render_engine",
-    "vimax_orchestrator", "novel_adapter", "script_parser", "dependency_graph", "meme_matcher", "asset_manager", "generative_video",
+    "google_auth_oauthlib.flow", "google.oauth2.credentials", "yt_dlp",
+    "pipeline", "uploader", "scorer", "transcriber", "video_engine", "ocr_engine", "rapidocr_onnxruntime",
+    "subtitle_engine", "music_finder", "social_metadata", "meme_matcher",
 ]
 
 
@@ -66,7 +64,7 @@ def check_scorer() -> str:
     clips = scorer.find_viral_clips(words, min_len=1, max_len=30)
     if not clips:
         raise RuntimeError("no clip returned")
-    return f"{len(clips)} clip(s); script words={scorer.generate_script('script about tea')['word_count']}"
+    return f"{len(clips)} clip(s)"
 
 
 def check_face_model() -> str:
@@ -127,67 +125,61 @@ def check_clip_pipeline() -> str:
     return f"{res['frames']} frames cropped to 9:16, {size // 1024} KB encoded"
 
 
-def check_avatar() -> str:
-    """Render a 2 s talking avatar with the real BlazeFace model, ffmpeg and OpenCV."""
-    import cv2
-    import numpy as np
-    import avatar_sync
+
+
+
+def check_subtitles() -> str:
+    """Chunk words into 3-5 word cues, write .srt/.ass and burn them into a real clip with the bundled ffmpeg."""
+    import subtitle_engine as se
     import video_engine
 
+    words = [{"word": w, "start": i * 0.35, "end": i * 0.35 + 0.3}
+             for i, w in enumerate("Here is the truth about building muscle fast today".split())]
+    cues = se.cues_for_clip(words, 0.0, 4.0)
+    if not cues or any(not 1 <= len(c["text"].split()) <= 5 for c in cues):
+        raise RuntimeError(f"bad cues: {cues}")
+    ff = video_engine.find_ffmpeg()
     with tempfile.TemporaryDirectory() as d:
-        img, wav, out = (os.path.join(d, n) for n in ("a.png", "a.wav", "a.mp4"))
-        pic = np.full((640, 480, 3), (120, 150, 190), np.uint8)
-        cv2.ellipse(pic, (240, 300), (140, 190), 0, 0, 360, (150, 190, 235), -1)
-        cv2.imwrite(img, pic)
-        subprocess.run([video_engine.find_ffmpeg(), "-y", "-loglevel", "error", "-f", "lavfi", "-i",
-                        "sine=frequency=200:duration=2", wav], check=True, timeout=60, creationflags=_flags())
-        res = avatar_sync.create_avatar_video(img, wav, out, size=(360, 640))
-        size = os.path.getsize(out)
-        if size < 1000 or res["frames"] < 40:
-            raise RuntimeError(f"avatar video is empty or short: {res}")
-    return f"{res['frames']} frames, {res['mode']} animation, {size // 1024} KB"
+        src, out = os.path.join(d, "s.mp4"), os.path.join(d, "o.mp4")
+        subprocess.run([ff, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=270x480:rate=15:duration=3",
+                        "-pix_fmt", "yuv420p", src], check=True, timeout=60, creationflags=_flags())
+        files = se.write_subtitle_files(cues, os.path.join(d, "subs"), size=(270, 480))
+        video_engine.burn_subtitles(src, files["ass"], out, ffmpeg_path=ff)
+        if os.path.getsize(out) < 1000:
+            raise RuntimeError("burned clip is empty")
+    return f"{len(cues)} cues, .srt + .ass written and burned in"
 
 
-def check_avatar_3d() -> str:
-    """Render a talking built-in 3-D avatar (phoneme lip-sync + gestures), then place it in a podcast corner frame."""
-    import avatar_3d_engine
-    import demo_avatars
+def check_music() -> str:
+    """Mix a cached tone under a clip with ducking (no network); then confirm yt-dlp's search API is importable."""
+    import yt_dlp
+    import music_finder
     import video_engine
 
+    ff = video_engine.find_ffmpeg()
     with tempfile.TemporaryDirectory() as d:
-        wav, av, base, out = (os.path.join(d, n) for n in ("a.wav", "av.mp4", "base.mp4", "out.mp4"))
-        ff = video_engine.find_ffmpeg()
-        subprocess.run([ff, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=220:duration=1.5", wav],
+        src, bgm, out = (os.path.join(d, n) for n in ("s.mp4", "m.mp3", "o.mp4"))
+        subprocess.run([ff, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=270x480:rate=15:duration=3",
+                        "-f", "lavfi", "-i", "sine=frequency=300:duration=3", "-shortest", "-pix_fmt", "yuv420p", src],
                        check=True, timeout=60, creationflags=_flags())
-        model = demo_avatars.ensure_demo_avatars(d)["human"]
-        res = avatar_3d_engine.create_3d_avatar_video(model, wav, av, text="Hello there, welcome to the show.",
-                                                      size=(240, 320), fps=20, quality="fast", ffmpeg_path=ff)
-        subprocess.run([ff, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=navy:s=360x640:r=20:d=1.5",
-                        "-i", wav, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", base],
+        subprocess.run([ff, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=500:duration=1", bgm],
                        check=True, timeout=60, creationflags=_flags())
-        placed = video_engine.place_podcast_avatar(base, av, "Bottom-Right", None, 0.4, out, ffmpeg_path=ff)
-        size = os.path.getsize(out)
-        if size < 1000 or res["frames"] < 25:
-            raise RuntimeError(f"3-D avatar video is empty or short: {res}")
-    return f"{res['frames']} frames, {res['lip_sync']} lip-sync, placed at {placed['rect'][:2]}"
+        video_engine.mix_background_music(src, bgm, out, music_volume=0.15, duck=True, ffmpeg_path=ff)
+        if os.path.getsize(out) < 1000:
+            raise RuntimeError("mixed clip is empty")
+    return f"BGM mixed with ducking; yt-dlp {yt_dlp.version.__version__}; cache={music_finder.DEFAULT_CACHE}"
 
 
-def check_render_engine() -> str:
-    """Compose a video from tracks: voiceover + animated backdrop + timed on-screen text (render_engine)."""
-    import render_engine
-    import video_engine
+def check_social() -> str:
+    import social_metadata as sm
 
-    with tempfile.TemporaryDirectory() as d:
-        wav, out = os.path.join(d, "v.wav"), os.path.join(d, "o.mp4")
-        ff = video_engine.find_ffmpeg()
-        subprocess.run([ff, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=300:duration=1.5", wav],
-                       check=True, timeout=60, creationflags=_flags())
-        res = render_engine.render_commentary(wav, out, None, None,
-                                              screen_segments=[{"text": "SELF TEST", "start": 0.2, "end": 1.2}],
-                                              size=(270, 480), fps=20, ffmpeg_path=ff)
-        if os.path.getsize(out) < 1000 or res["frames"] < 25:
-            raise RuntimeError(f"composed video is empty or short: {res}")
-    return f"{res['frames']} frames, tracks: {sorted({t['track'] for t in res['tracks']})}"
+    p = sm.generate_packages("You need to eat more protein every single day. Protein and sleep build muscle.", use_llm="off")
+    yt, ig, fb = p["youtube"], p["instagram"], p["facebook"]
+    if len(yt["title"]) >= 60 or "#Shorts" not in yt["description"] + " ".join(yt.get("tags", [])):
+        raise RuntimeError(f"bad YouTube package: {yt}")
+    if not 15 <= len(ig["hashtags"]) <= 20 or not 5 <= len(fb["hashtags"]) <= 8:
+        raise RuntimeError("hashtag counts out of range")
+    return f"YT title {len(yt['title'])} chars, {len(ig['hashtags'])} IG tags, {len(fb['hashtags'])} FB tags"
 
 
 def check_memes() -> str:
@@ -221,93 +213,7 @@ def check_memes() -> str:
     return f"{len(lib.clips)} starter clips, laugh matched, reaction spliced"
 
 
-def check_episode_studio() -> str:
-    """Asset gate -> prompt cards -> generated pictures -> locked references -> scenic render, all offline on the CPU."""
-    import asset_manager
-    import vimax_orchestrator as vo
-    import video_engine
 
-    script = ("INT. KITCHEN - NIGHT\n\nMaya, a tall woman in a red apron, stirs a pot.\n\nMAYA\nHello there!\n\n"
-              "BOB\nGood evening.\n")
-    with tempfile.TemporaryDirectory() as d:
-        plan = vo.ViMaxOrchestrator().run(script, mode="script2video", max_shots=4)
-        if not plan["asset_gate"]["open"]:
-            raise RuntimeError("the asset gate did not stop the run")
-        book = vo.open_asset_gate(plan, os.path.join(d, "assets"))
-        try:
-            vo.render_storyboard(plan, os.path.join(d, "x.mp4"), assets=book, size=(90, 160))
-            raise RuntimeError("rendering was allowed while the gate was closed")
-        except asset_manager.AssetGateError:
-            pass
-        asset_manager.generate_images(book, backend="draw")
-        vo.close_asset_gate(plan, book)
-        out = os.path.join(d, "ep.mp4")
-        res = vo.render_storyboard(plan, out, work_dir=os.path.join(d, "w"), assets=book, size=(90, 160), fps=8,
-                                   ffmpeg_path=video_engine.find_ffmpeg())
-        if res["locks"] or not res["conditioning"] or os.path.getsize(out) < 1000:
-            raise RuntimeError(f"scene render failed: {res['locks']}")
-    return f"{len(book.cards)} cards, gate held, {len(res['conditioning'])} locked appearances rendered"
-
-
-def check_generative_video() -> str:
-    """Generative-video adapters (a stand-in model, so no GPU / weights / network), the fallback loop and the word-boundary
-    caption alignment."""
-    import numpy as np
-    import types
-    import cv2
-    import generative_video as gv
-    import transcriber
-    import video_engine
-
-    class Pipe:
-        def __call__(self, **kw):
-            from PIL import Image
-
-            frames = []
-            for i in range(kw["num_frames"]):
-                a = np.full((kw["height"], kw["width"], 3), 40, np.uint8)
-                cv2.circle(a, (20 + i * 3, kw["height"] // 2), 12, (255, 255, 0), -1)
-                frames.append(Image.fromarray(a))
-            return types.SimpleNamespace(frames=[frames])
-
-    ff = video_engine.find_ffmpeg()
-    with tempfile.TemporaryDirectory() as d:
-        init = os.path.join(d, "init.png")
-        cv2.imwrite(init, np.full((160, 90, 3), 90, np.uint8))
-        fac = gv.VideoFactory("ltx", pipe_factory=lambda k: Pipe(), ffmpeg=ff)
-        fac.backends[0].check = lambda: None
-        rec = fac.shot_video(0, init, "a cat walks", (90, 160), 1.0, 12, os.path.join(d, "g.mp4"))
-        if not rec or rec["backend"] != "ltx" or os.path.getsize(rec["path"]) < 500:
-            raise RuntimeError(f"generative clip failed: {fac.warnings}")
-        offline = gv.VideoFactory("pollinations", api_key="", probe=lambda: False, ffmpeg=ff)
-        if offline.shot_video(0, init, "p", (90, 160), 1.0, 12, os.path.join(d, "o.mp4")) is not None or not offline.warnings:
-            raise RuntimeError("the offline fallback did not trigger")
-    words = transcriber.align_words("Hello there, world.", [{"word": "hello", "start": 0.1, "end": 0.4},
-                                                            {"word": "there", "start": 0.5, "end": 0.8},
-                                                            {"word": "world", "start": 1.0, "end": 1.4}])
-    if not words or not all(w["exact"] for w in words) or abs(words[2]["t0"] - 1.0) > 1e-6:
-        raise RuntimeError("word alignment failed")
-    return "stand-in model clip written, offline fallback works, 3 words aligned to spoken times"
-
-
-def check_story() -> str:
-    """Story Studio on the CPU: screenplay -> agents -> consistency graph -> 2-shot animatic (no network, no GPU)."""
-    import vimax_orchestrator as vo
-
-    script = "INT. KITCHEN - NIGHT\n\nBOB\nHello there.\n\nAMY\nHi Bob.\n"
-    r = vo.ViMaxOrchestrator(vo.OfflineClient()).run(script, mode="script2video")
-    errors = [i for i in r["issues"] if i["severity"] == "error"]
-    if errors or len(r["storyboard"]["shots"]) < 3:
-        raise RuntimeError(f"storyboard check failed: {errors or 'too few shots'}")
-    with tempfile.TemporaryDirectory() as d:
-        out = os.path.join(d, "s.mp4")
-        res = vo.render_storyboard(r, out, work_dir=os.path.join(d, "w"), size=(270, 480), fps=8, max_shots=3)
-        if os.path.getsize(out) < 1000 or not res["drift"]:
-            raise RuntimeError(f"animatic is empty: {res}")
-        bad = [x for x in res["drift"] if x["status"] != "ok"]
-        if bad:
-            raise RuntimeError(f"character appearance drifted: {bad}")
-    return f"{len(r['storyboard']['shots'])} shots, {len(r['graph']['edges'])} graph edges, {len(res['drift'])} appearances consistent"
 
 
 def check_ocr() -> str:
@@ -334,29 +240,6 @@ def check_ocr() -> str:
     return f"read {len(segs)} line(s): {segs[0]['text']!r}"
 
 
-def check_cues() -> str:
-    """Apply a real zoom + flash to a clip (decode, warp, re-encode, audio kept)."""
-    import cv2
-    import numpy as np
-    import video_engine
-    import visual_cues
-
-    ff = video_engine.find_ffmpeg()
-    with tempfile.TemporaryDirectory() as d:
-        src, out = os.path.join(d, "s.mp4"), os.path.join(d, "o.mp4")
-        subprocess.run([ff, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15:duration=2",
-                        "-f", "lavfi", "-i", "sine=frequency=300:duration=2", "-shortest", "-pix_fmt", "yuv420p", src],
-                       check=True, timeout=60, creationflags=_flags())
-        res = visual_cues.apply_cues_to_video(src, [{"effect": "zoom_in", "start": 0.0, "end": 1.0},
-                                                    {"effect": "flash", "start": 1.0, "end": 1.5}], out, ffmpeg_path=ff)
-        cap = cv2.VideoCapture(out)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 16)
-        ok, frame = cap.read()
-        cap.release()
-        if res["cues_applied"] != 2 or not ok or float(np.mean(frame)) < 140:
-            raise RuntimeError(f"cues were not rendered: {res}")
-    return f"{res['cues_applied']} cues over {res['frames']} frames"
-
 
 def check_app_page(app_path: Optional[Path]) -> str:
     if app_path is None or not Path(app_path).is_file():
@@ -366,37 +249,12 @@ def check_app_page(app_path: Optional[Path]) -> str:
     at = AppTest.from_file(str(app_path), default_timeout=90).run()
     if at.exception:
         raise RuntimeError("; ".join(str(e.value) for e in at.exception))
-    box = at.selectbox(key="lab_mode")
-    modes = list(box.options)
-    if modes != ["Idea2Video", "Novel2Video", "Script2Video", "Clip Repurposer"]:
-        raise RuntimeError(f"unexpected creation modes: {modes}")
-    expect = {"Idea2Video": "story_text_idea2video", "Novel2Video": "story_text_novel2video",
-              "Script2Video": "story_text_script2video", "Clip Repurposer": "vugola_url"}
-    for mode in modes:  # every mode must draw without errors and show its own main field
-        at.selectbox(key="lab_mode").select(mode).run()
-        if at.exception:
-            raise RuntimeError(f"{mode}: " + "; ".join(str(e.value) for e in at.exception))
-        keys = {w.key for w in list(at.text_area) + list(at.text_input)}
-        if expect[mode] not in keys:
-            raise RuntimeError(f"{mode}: missing the field {expect[mode]}")
-    at.selectbox(key="lab_mode").select("Idea2Video").run()
-    at.selectbox(key="idea_flavor").select("Narrated video with a 3D avatar (classic)").run()
-    if at.exception or "viewmax_prompt" not in {w.key for w in at.text_area}:
-        raise RuntimeError("the classic narrated generator did not draw")
-    return f"all {len(modes)} creation modes (+ classic generator) render"
+    keys = {w.key for w in list(at.text_input) + list(at.checkbox) + list(at.button)}
+    for need in ("vugola_url", "subs_on", "music_on", "drive_on", "music_scan", "vugola_run"):
+        if need not in keys:
+            raise RuntimeError(f"Viral Clip Studio is missing the control {need}")
+    return "Viral Clip Studio renders with subtitle, music and Drive controls"
 
-
-def check_tts_online() -> str:
-    import asyncio
-    import edge_tts
-
-    async def go(path):
-        await edge_tts.Communicate("Self test.", "en-US-AriaNeural").save(path)
-
-    with tempfile.TemporaryDirectory() as d:
-        p = os.path.join(d, "t.mp3")
-        asyncio.run(asyncio.wait_for(go(p), timeout=40))
-        return f"voice generated ({os.path.getsize(p)} bytes)"
 
 
 def run_all(app_path: Optional[Path] = None, log: Callable[[str], None] = print) -> List[Result]:
@@ -407,17 +265,12 @@ def run_all(app_path: Optional[Path] = None, log: Callable[[str], None] = print)
         ("face model", "fail", check_face_model),
         ("whisper model", "fail", check_whisper),
         ("clip pipeline", "fail", check_clip_pipeline),
-        ("avatar lip-sync", "fail", check_avatar),
-        ("3D avatar + podcast layout", "fail", check_avatar_3d),
-        ("multi-track render engine", "fail", check_render_engine),
-        ("story studio (agents + consistency graph)", "fail", check_story),
+        ("burned-in subtitles (.srt/.ass)", "fail", check_subtitles),
+        ("background music mixer", "fail", check_music),
+        ("YT/IG/FB captions & tags", "fail", check_social),
         ("auto-meme reactions", "fail", check_memes),
-        ("episode studio (asset gate + scene renderer)", "fail", check_episode_studio),
-        ("generative video (adapters + fallback + word timing)", "fail", check_generative_video),
         ("on-screen text (OCR)", "fail", check_ocr),
-        ("visual action cues", "fail", check_cues),
         ("app page", "fail", lambda: check_app_page(app_path)),
-        ("edge-tts (online)", "warn", check_tts_online),
     ]
     results: List[Result] = []
     for name, severity, fn in checks:

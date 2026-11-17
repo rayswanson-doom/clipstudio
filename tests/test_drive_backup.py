@@ -14,7 +14,6 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 import pipeline  # noqa: E402
 import uploader  # noqa: E402
-from tests.test_pipeline import FakeVoice  # noqa: E402
 from tests.test_scorer import make_words  # noqa: E402
 from tests.test_video_engine import FFMPEG, make_source, probe, square_detector  # noqa: E402
 
@@ -170,45 +169,13 @@ class PipelineBackupTests(unittest.TestCase):
         self.assertTrue(all(c["drive_link"] == "L" for c in res["clips"] if not c["error"]))
 
 
-@unittest.skipUnless(FFMPEG, "ffmpeg not installed")
-class ViewmaxBackupTests(unittest.TestCase):
-    def run_lab(self, up, **kw):
-        FakeVoice.seconds = 2
-        with tempfile.TemporaryDirectory() as d, mock.patch.object(
-            pipeline, "generate_voiceover", FakeVoice.generate
-        ), mock.patch.object(pipeline, "drive_status", return_value="ready"), mock.patch.object(
-            pipeline, "upload_to_google_drive", up
-        ):
-            res = pipeline.run_viewmax_pipeline("A 20 second script about tea", "FOLD", output_dir=d,
-                                                ffmpeg_path=FFMPEG, **kw)
-            self.assertTrue(os.path.isfile(res["video_path"]))
-            res["_size"] = os.path.getsize(res["video_path"])
-        return res
-
-    def test_video_is_backed_up(self):
-        up = mock.Mock(return_value="https://drive/v")
-        res = self.run_lab(up)
-        self.assertEqual(res["drive_link"], "https://drive/v")
-        self.assertTrue(up.call_args[0][0].endswith(".mp4"))
-        self.assertEqual(up.call_args[0][1], "FOLD")
-
-    def test_drive_failure_keeps_the_video_and_warns(self):
-        res = self.run_lab(mock.Mock(side_effect=FileNotFoundError("No valid token.json")))
-        self.assertIsNone(res["drive_link"])
-        self.assertGreater(res["_size"], 1000)
-        self.assertTrue(any("Drive backup failed" in w and "saved on this computer" in w for w in res["warnings"]))
-
-    def test_lip_synced_avatar_video_is_what_gets_backed_up(self):
-        import cv2
-        import numpy as np
-        up = mock.Mock(return_value="https://drive/avatar")
+class BackupFilesTests(unittest.TestCase):
+    def test_finished_clips_are_collected_for_backup(self):
         with tempfile.TemporaryDirectory() as d:
-            img = os.path.join(d, "me.png")
-            cv2.imwrite(img, np.full((640, 480, 3), 120, np.uint8))
-            res = self.run_lab(up, avatar_image=img, avatar_enabled=True)
-        self.assertIsNotNone(res["avatar"])
-        self.assertEqual(up.call_args[0][0], res["video_path"])
-        self.assertEqual(res["drive_link"], "https://drive/avatar")
+            a = os.path.join(d, "a.mp4")
+            Path(a).write_bytes(b"x")
+            res = {"clips": [{"output_path": a}, {"output_path": None}, {"output_path": a}]}
+            self.assertEqual(uploader.collect_final_videos(res), [a])
 
 
 if __name__ == "__main__":

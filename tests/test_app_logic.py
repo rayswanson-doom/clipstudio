@@ -13,6 +13,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
+import music_finder  # noqa: E402
 import pipeline  # noqa: E402
 import uploader  # noqa: E402
 
@@ -96,7 +97,7 @@ class FakeSt:
         return self.inputs.get(key, list(options)[index])
 
     def button(self, label, key=None, **k):
-        self._log("button", label, key=key)
+        self._log("button", label, key=key, disabled=k.get("disabled"))
         return key in self.clicked
 
     # layout
@@ -125,62 +126,67 @@ class FakeSt:
         return f
 
 
-class ClipFake(FakeSt):
-    DEFAULTS = {"lab_mode": "Clip Repurposer"}
-
-
-class ClassicFake(FakeSt):
-    DEFAULTS = {"lab_mode": "Idea2Video", "idea_flavor": "Narrated video with a 3D avatar (classic)"}
-
-
 def run_app(fake):
     with mock.patch.dict(sys.modules, {"streamlit": fake}):
         runpy.run_path(str(APP), run_name="__main__")
     return fake
 
 
-CLIP = {"start": 1.0, "end": 20.0, "duration": 19.0, "score": 9.5, "reasons": ["question"],
-        "text": "Did you know?", "output_path": "/tmp/c1.mp4", "drive_link": "https://drive/c1", "error": None}
-VUGOLA = {"source_path": "/tmp/s.mp4", "word_count": 120, "clips": [CLIP], "warnings": []}
-VIEWMAX = {"script": {"script": "Hello there", "word_count": 2, "estimated_seconds": 0.8},
-           "audio_path": "/tmp/a.mp3", "video_path": "/tmp/v.mp4", "drive_link": "https://drive/v",
-           "warnings": []}
+SOCIAL = {
+    "keywords": ["protein"], "hook": "Eat more protein.", "source": "offline", "warnings": [],
+    "youtube": {"title": "Eat more protein", "description": "Eat more protein.\n\n#Shorts", "tags": ["protein", "Shorts"],
+                "hashtags": ["#Shorts"], "copy_text": "x"},
+    "instagram": {"hook": "h", "caption": "c", "cta": "Save this", "hashtags": ["#a"] * 15, "copy_text": "IG TEXT"},
+    "facebook": {"caption": "fb", "hashtags": ["#a"] * 5, "copy_text": "FB TEXT"},
+}
+CLIP = {"start": 1.0, "end": 20.0, "duration": 19.0, "score": 9.5, "reasons": ["question"], "faces_found": 10,
+        "text": "Did you know?", "output_path": "/tmp/c1.mp4", "drive_link": "https://drive/c1", "error": None,
+        "subtitled": True, "music_mixed": True, "social": SOCIAL, "subtitle_files": {"srt": "/tmp/c1.srt", "ass": "/tmp/c1.ass"}}
+VUGOLA = {"source_path": "/tmp/s.mp4", "word_count": 120, "clips": [CLIP], "warnings": [], "music": None}
+TRACKS = [{"id": "a1", "title": "Lofi beat", "channel": "Chill", "url": "https://youtu.be/a1", "view_count": 2_500_000,
+           "duration": 150, "upload_date": "2026-11-01"},
+          {"id": "b2", "title": "Hype", "channel": "Gym", "url": "https://youtu.be/b2", "view_count": 90_000,
+           "duration": 95, "upload_date": "2026-10-20"}]
+
+
+def clip_keys(f):
+    return {c[2].get("key") for n in ("text_input", "checkbox", "button", "file_uploader", "selectbox", "slider", "radio")
+            for c in f.names(n) if c[2].get("key")}
 
 
 class StructureTests(unittest.TestCase):
-    def test_four_creation_modes_and_sidebar_folder_field(self):
+    def test_page_is_the_viral_clip_studio_only(self):
         f = run_app(FakeSt())
-        self.assertIsNone(f.tab_labels)  # one Lab with a mode selector, no separate tabs
-        mode = [c for c in f.names("selectbox") if c[2]["key"] == "lab_mode"][0]
-        self.assertEqual(mode[1][0], "Creation mode")
-        self.assertEqual(mode[2]["options"], ["Idea2Video", "Novel2Video", "Script2Video", "Clip Repurposer"])
-        labels = [c[1][0] for c in f.names("text_input")]
-        self.assertIn("Google Drive Folder ID", labels)
+        keys = clip_keys(f)
+        for need in ("vugola_url", "vugola_file", "subs_on", "subs_size", "subs_color", "music_on", "music_scan",
+                     "music_volume", "drive_on", "vugola_run", "drive_folder_id", "vugola_meme_on"):
+            self.assertIn(need, keys)
+        self.assertFalse({k for k in keys if k.startswith(("story_", "viewmax_", "wiz_", "lab_"))}, keys)
         self.assertEqual(f.names("set_page_config")[0][2]["layout"], "wide")
+        self.assertIsNone(f.tab_labels)
 
-    def test_each_mode_shows_only_its_own_controls(self):
-        def keys(inputs):
-            f = run_app(FakeSt(inputs))
-            return {c[2].get("key") for n in ("text_area", "text_input", "button", "file_uploader", "selectbox") for c in f.names(n)}
-        idea = keys({})
-        self.assertIn("story_text_idea2video", idea)
-        self.assertNotIn("vugola_url", idea)
-        self.assertNotIn("story_file_idea2video", idea)  # ideas are typed, not uploaded
-        self.assertIn("story_file_novel2video", keys({"lab_mode": "Novel2Video"}))
-        self.assertIn("story_file_script2video", keys({"lab_mode": "Script2Video"}))
-        clip = keys({"lab_mode": "Clip Repurposer"})
-        self.assertIn("vugola_url", clip)
-        self.assertNotIn("story_text_idea2video", clip)
-        classic = keys({"idea_flavor": "Narrated video with a 3D avatar (classic)"})
-        self.assertIn("viewmax_prompt", classic)
-        self.assertNotIn("story_text_idea2video", classic)
+    def test_toggle_labels_and_defaults(self):
+        f = run_app(FakeSt())
+        boxes = {c[2]["key"]: c for c in f.names("checkbox")}
+        self.assertEqual(boxes["subs_on"][1][0], "Burn-in Subtitles")
+        self.assertEqual(boxes["music_on"][1][0], "Add Trending YouTube Background Music")
+        self.assertEqual(boxes["drive_on"][1][0], "Auto-Upload to Google Drive")
+        self.assertEqual(boxes["music_on"][2].get("value", False) if "value" in boxes["music_on"][2] else False, False)
+        buttons = [c[1][0] for c in f.names("button")]
+        self.assertTrue(any("Scan Trending Tracks" in b for b in buttons))
+        sizes = [c for c in f.names("selectbox") if c[2]["key"] == "subs_size"][0][2]["options"]
+        self.assertEqual(sizes, list(pipeline.subtitle_engine.SIZE_PRESETS))
 
-    def test_no_widget_key_is_used_twice_on_one_page(self):
-        for inputs in ({}, {"lab_mode": "Novel2Video"}, {"lab_mode": "Script2Video"}, {"lab_mode": "Clip Repurposer"},
-                       {"idea_flavor": "Narrated video with a 3D avatar (classic)"}):
+    def test_no_widget_key_is_used_twice(self):
+        for inputs in ({}, {"music_on": True}, {"drive_folder_id": "F"}):
             f = run_app(FakeSt(inputs))
             ks = [c[2].get("key") for c in f.calls if c[2].get("key")]
             self.assertEqual(len(ks), len(set(ks)), inputs)
+
+    def test_no_removed_feature_is_mentioned_in_the_source(self):
+        text = APP.read_text(encoding="utf-8").lower()
+        for word in ("avatar", "idea2video", "novel2video", "script2video", "episode", "lip-sync", "run_viewmax", "podcast"):
+            self.assertNotIn(word, text)
 
     def test_token_status_in_sidebar(self):
         with tempfile.NamedTemporaryFile() as tok, mock.patch.object(uploader, "TOKEN_FILE", Path(tok.name)):
@@ -191,423 +197,188 @@ class StructureTests(unittest.TestCase):
         self.assertTrue(any("not connected" in c[1][0] for c in f.names("warning")))
 
     def test_hint_when_folder_empty(self):
-        f = run_app(FakeSt())
+        f = run_app(FakeSt({"drive_on": True}))
         self.assertTrue(any("Folder ID" in c[1][0] for c in f.names("info")))
-        f = run_app(FakeSt(inputs={"drive_folder_id": "ABC"}))
+        f = run_app(FakeSt(inputs={"drive_folder_id": "ABC", "drive_on": True}))
         self.assertFalse(any("Folder ID" in c[1][0] for c in f.names("info")))
 
 
-class VugolaTabTests(unittest.TestCase):
-    def test_url_run_calls_pipeline_and_shows_results(self):
-        with mock.patch.object(pipeline, "run_vugola_pipeline", return_value=VUGOLA) as rv:
-            f = run_app(ClipFake({"vugola_url": " https://youtu.be/x ", "drive_folder_id": " FOLDER "},
-                               clicked=["vugola_run"]))
+class RunTests(unittest.TestCase):
+    def test_url_run_calls_pipeline_with_the_new_options_and_shows_results(self):
+        with mock.patch.object(pipeline, "run_vugola_pipeline", return_value=VUGOLA) as rv, \
+                mock.patch("os.path.isfile", side_effect=lambda p: str(p) == "/tmp/c1.mp4"), \
+                mock.patch("builtins.open", mock.mock_open(read_data=b"mp4")):
+            f = run_app(FakeSt({"vugola_url": " https://youtu.be/x ", "drive_folder_id": " FOLDER ",
+                                "drive_on": True, "social_topics": "fitness, protein ,"}, clicked=["vugola_run"]))
         args, kw = rv.call_args
         self.assertEqual(args, ("https://youtu.be/x", "FOLDER"))
         self.assertEqual((kw["top_n"], kw["min_len"], kw["max_len"]), (3, 15, 45))
+        self.assertEqual(kw["subtitles"], {"enabled": True, "size": "Medium", "color": "White", "uppercase": False})
+        self.assertIsNone(kw["music"])
+        self.assertTrue(kw["upload"])
+        self.assertEqual(kw["social"]["topic_keywords"], ["fitness", "protein"])
         self.assertIs(f.session_state["vugola_result"], VUGOLA)
         self.assertEqual(f.names("video")[0][1][0], "/tmp/c1.mp4")
+        self.assertEqual(f.names("download_button")[0][2]["file_name"], "c1.mp4")
         self.assertEqual(f.names("link_button")[0][1], ("Open in Google Drive", "https://drive/c1"))
         self.assertTrue(f.bar.updates)
+
+    def test_toggles_off_send_none_and_no_upload(self):
+        with mock.patch.object(pipeline, "run_vugola_pipeline", return_value=VUGOLA) as rv:
+            run_app(FakeSt({"vugola_url": "u", "subs_on": False, "drive_on": False}, clicked=["vugola_run"]))
+        kw = rv.call_args.kwargs
+        self.assertIsNone(kw["subtitles"])
+        self.assertIsNone(kw["music"])
+        self.assertFalse(kw["upload"])
+
+    def test_subtitle_style_choices_are_forwarded(self):
+        with mock.patch.object(pipeline, "run_vugola_pipeline", return_value=VUGOLA) as rv:
+            run_app(FakeSt({"vugola_url": "u", "subs_size": "Large", "subs_color": "Yellow", "subs_upper": True},
+                           clicked=["vugola_run"]))
+        self.assertEqual(rv.call_args.kwargs["subtitles"], {"enabled": True, "size": "Large", "color": "Yellow", "uppercase": True})
 
     def test_uploaded_file_is_saved_and_preferred_over_url(self):
         seen = {}
 
         def fake_pipeline(source, *a, **k):
-            seen["source"], seen["bytes"] = source, Path(source).read_bytes()  # file exists DURING the run
+            seen["source"], seen["bytes"] = source, Path(source).read_bytes()
             return VUGOLA
 
         with mock.patch.object(pipeline, "run_vugola_pipeline", side_effect=fake_pipeline):
-            run_app(ClipFake({"vugola_file": FakeUpload(), "vugola_url": "https://youtu.be/x"},
-                           clicked=["vugola_run"]))
+            run_app(FakeSt({"vugola_file": FakeUpload(), "vugola_url": "https://youtu.be/x"}, clicked=["vugola_run"]))
         self.assertTrue(seen["source"].endswith("my clip.mp4"))
         self.assertEqual(seen["bytes"], b"video-bytes")
         self.assertFalse(Path(seen["source"]).exists(), "temporary upload must be deleted after the run")
 
     def test_nothing_entered_warns_and_skips_pipeline(self):
         with mock.patch.object(pipeline, "run_vugola_pipeline") as rv:
-            f = run_app(ClipFake(clicked=["vugola_run"]))
+            f = run_app(FakeSt(clicked=["vugola_run"]))
         rv.assert_not_called()
         self.assertTrue(any("YouTube URL" in c[1][0] for c in f.names("warning")))
 
     def test_min_greater_than_max(self):
         with mock.patch.object(pipeline, "run_vugola_pipeline") as rv:
-            f = run_app(ClipFake({"vugola_url": "u", "vugola_min_len": 50, "vugola_max_len": 20},
-                               clicked=["vugola_run"]))
+            f = run_app(FakeSt({"vugola_url": "u", "vugola_min_len": 50, "vugola_max_len": 20}, clicked=["vugola_run"]))
         rv.assert_not_called()
         self.assertTrue(f.names("error"))
 
     def test_pipeline_error_is_shown(self):
         with mock.patch.object(pipeline, "run_vugola_pipeline", side_effect=RuntimeError("no speech")):
-            f = run_app(ClipFake({"vugola_url": "u"}, clicked=["vugola_run"]))
+            f = run_app(FakeSt({"vugola_url": "u"}, clicked=["vugola_run"]))
         self.assertTrue(any("no speech" in c[1][0] for c in f.names("error")))
         self.assertNotIn("vugola_result", f.session_state)
 
-    def test_clip_error_and_warnings_rendered(self):
-        bad = {**VUGOLA, "warnings": ["No Google Drive Folder ID set"],
-               "clips": [{**CLIP, "drive_link": None, "error": "drive down"}]}
+    def test_clip_error_warnings_and_unavailable_preview(self):
+        bad = {**VUGOLA, "warnings": ["Background music was skipped: offline"],
+               "clips": [{**CLIP, "drive_link": None, "error": "drive down", "output_path": None, "subtitled": False,
+                          "music_mixed": False, "social": None, "subtitle_files": None}]}
         with mock.patch.object(pipeline, "run_vugola_pipeline", return_value=bad):
-            f = run_app(ClipFake({"vugola_url": "u"}, clicked=["vugola_run"]))
-        self.assertTrue(any("No Google Drive" in c[1][0] for c in f.names("warning")))
+            f = run_app(FakeSt({"vugola_url": "u"}, clicked=["vugola_run"]))
+        self.assertTrue(any("music was skipped" in c[1][0] for c in f.names("warning")))
         self.assertTrue(any("drive down" in c[1][0] for c in f.names("error")))
         self.assertFalse(f.names("link_button"))
+        self.assertFalse(f.names("video"))
+        self.assertTrue(any("No captions" in c[1][0] for c in f.names("caption")))
 
 
-STORY = {"mode": "script2video", "plan": {"title": "T"}, "script": "INT. A - DAY\n", "warnings": [], "issues": [], "trace": [{"agent": "Director", "note": "n"}],
-         "characters": [{"name": "Bob", "visual_identifier": "tall"}], "drift": [], "project_dir": "/tmp/p", "video_path": "/tmp/s.mp4",
-         "drive_link": "https://drive/s",
-         "storyboard": {"total_duration": 3.0, "shots": [{"idx": 0, "start": 0.0, "end": 3.0, "shot_type": "wide", "camera_angle": "eye",
-                                                           "camera_movement": "static", "characters": ["Bob"], "camera_prompt": "cp"}]}}
-
-
-SCRIPT = """Title: Kitchen Mix-up
-
-INT. KITCHEN - NIGHT
-
-Maya, a tall woman in a red apron with long black hair, stirs a pot.
-
-MAYA
-LOL that was hilarious!
-
-BOB
-No way, I can't believe it!
-
-EXT. STREET - DAY
-
-Bob, an old man in a grey coat, waves from the street.
-
-BOB
-Good morning!
-"""
-
-
-def real_plan(folder, mode="script2video"):
-    """A genuine planned episode with its asset gate open and the prompt cards saved in `folder`."""
-    import vimax_orchestrator as vo
-    plan = vo.ViMaxOrchestrator().run(SCRIPT, mode=mode)
-    vo.open_asset_gate(plan, folder)
-    plan.update({"assets_dir": folder, "frame_size": [180, 320], "warnings": [], "project_dir": folder + "_p", "video_path": None})
-    return plan
-
-
-def wizard_state(folder, step, mode="script2video", fill=False):
-    plan = real_plan(folder, mode)
-    if fill:
-        am = pipeline.asset_manager
-        book = am.AssetBook.load(folder)
-        am.generate_images(book, backend="draw", frame_size=(180, 320))
-        book.save()
-    return {"step": step, "source": SCRIPT, "plan": plan, "temp": [], "seen": {}, "backend": "draw",
-            "common": {"mode": mode, "folder_id": None, "output_dir": "/tmp/o", "provider": "offline", "api_key": None, "style": "human",
-                       "target_seconds": 30.0, "episode": 1, "episodes": None, "all_episodes": False, "camera": None,
-                       "use_portraits": True, "continuity": True, "drift_threshold": 0.35, "host_avatar": None}}
-
-
-class StoryTabTests(unittest.TestCase):
-    def test_controls_exist_in_every_story_mode(self):
-        for mode, label in (("idea2video", "Idea2Video"), ("novel2video", "Novel2Video"), ("script2video", "Script2Video")):
-            f = run_app(FakeSt({"lab_mode": label}))
-            keys = {c[2]["key"] for n in ("selectbox", "text_area", "checkbox", "slider", "file_uploader") for c in f.names(n)}
-            self.assertTrue({f"story_text_{mode}", "story_style", "story_provider", "story_portraits", "story_continuity",
-                             "story_tolerance", "story_cam_size", "story_cam_angle", "story_cam_move", "story_host_on",
-                             "story_host_pos", "story_host_scale", "story_host_file"} <= keys, (mode, keys))
-        f = run_app(FakeSt({"lab_mode": "Novel2Video"}))
-        up = [c for c in f.names("file_uploader") if c[2]["key"] == "story_file_novel2video"]
-        self.assertEqual(up[0][2]["type"], ["txt", "md", "fountain"])
-        f = run_app(FakeSt())
-        self.assertIn("story_episodes", {c[2]["key"] for c in f.names("number_input")})
-        f = run_app(FakeSt({"lab_mode": "Script2Video"}))
-        self.assertNotIn("story_episodes", {c[2]["key"] for c in f.names("number_input")})  # a script is already one episode
-
-    def test_empty_text_warns_and_does_not_run(self):
-        with mock.patch.object(pipeline, "run_story_pipeline", return_value=STORY) as rs:
-            f = run_app(FakeSt(clicked=["story_run"]))
-        rs.assert_not_called()
-        self.assertTrue(any("Type or upload" in c[1][0] for c in f.names("warning")))
-
-    def test_script_run_forwards_every_option_and_shows_results(self):
-        plan = real_plan(tempfile.mkdtemp())
-        with mock.patch.object(pipeline, "run_story_pipeline", return_value=plan) as rs:
-            f = run_app(FakeSt({"lab_mode": "Script2Video", "story_text_script2video": "INT. A - DAY\n\nBOB\nHi\n",
-                                "story_provider": "Groq (needs an API key)", "story_api_key": " k ", "story_style": "Anime",
-                                "story_seconds": 30, "drive_folder_id": "F", "story_portraits": False, "story_continuity": False,
-                                "story_tolerance": 20, "story_cam_size": "Close-ups", "story_cam_angle": "Low angle (heroic)",
-                                "story_cam_move": "Handheld", "story_host_on": True, "story_host_pos": "Top-Left",
-                                "story_host_scale": 33}, clicked=["story_run"]))
-        kw = rs.call_args[1]
-        self.assertEqual((kw["mode"], kw["provider"], kw["api_key"], kw["style"], kw["folder_id"]),
-                         ("script2video", "groq", "k", "anime", "F"))
-        self.assertEqual(kw["target_seconds"], 30.0)
-        self.assertEqual(kw["camera"], {"size": "close", "angle": "low", "movement": "handheld"})
-        self.assertEqual((kw["use_portraits"], kw["continuity"], kw["drift_threshold"]), (False, False, 0.2))
-        self.assertEqual(kw["host_avatar"], {"style": "anime", "position": "Top-Left", "xy": None, "scale": 0.33})
-        self.assertIsNone(kw["episodes"])
-        self.assertFalse(kw["all_episodes"])
-        self.assertFalse(kw["render"])  # step 1 only plans; rendering waits for the asset gate
-        self.assertNotIn("memes", kw)
-        wiz = f.session_state["wiz_script2video"]
-        self.assertEqual(wiz["step"], 2)
-        self.assertEqual(wiz["common"]["host_avatar"]["position"], "Top-Left")
-
-    def test_novel_makes_every_episode_by_default(self):
-        with mock.patch.object(pipeline, "run_story_pipeline", return_value={**STORY, "mode": "novel2video"}) as rs:
-            run_app(FakeSt({"lab_mode": "Novel2Video", "story_text_novel2video": "x", "story_episodes": 4}, clicked=["story_run"]))
-        kw = rs.call_args[1]
-        self.assertEqual((kw["mode"], kw["episodes"], kw["all_episodes"]), ("novel2video", 4, True))
-
-    def test_idea_single_episode_and_custom_host_coordinates(self):
-        with mock.patch.object(pipeline, "run_story_pipeline", return_value={**STORY, "mode": "idea2video"}) as rs:
-            run_app(FakeSt({"story_text_idea2video": "A story.", "story_host_on": True, "story_host_pos": "Custom Coordinates",
-                            "story_host_x": 55, "story_host_y": 77}, clicked=["story_run"]))
-        kw = rs.call_args[1]
-        self.assertEqual((kw["mode"], kw["all_episodes"], kw["episodes"]), ("idea2video", False, 1))
-        self.assertEqual(kw["host_avatar"]["xy"], (55, 77))
-        self.assertEqual(kw["host_avatar"]["position"], "Custom Coordinates")
-
-    def test_host_off_sends_no_host(self):
-        with mock.patch.object(pipeline, "run_story_pipeline", return_value=STORY) as rs:
-            run_app(FakeSt({"story_text_idea2video": "x", "story_host_pos": "Top-Left"}, clicked=["story_run"]))
-        self.assertIsNone(rs.call_args[1]["host_avatar"])
-
-    def test_uploaded_text_file_is_read_and_deleted(self):
-        up = FakeUpload("novel.txt", "Chapter 1\n\nElena walked.".encode())
-        with mock.patch.object(pipeline, "run_story_pipeline", return_value={**STORY, "mode": "novel2video"}) as rs:
-            run_app(FakeSt({"lab_mode": "Novel2Video", "story_file_novel2video": up}, clicked=["story_run"]))
-        self.assertIn("Elena walked", rs.call_args[0][0])
-
-    def test_offline_never_sends_the_key(self):
-        with mock.patch.object(pipeline, "run_story_pipeline", return_value=STORY) as rs:
-            run_app(FakeSt({"story_text_idea2video": "x", "story_api_key": "leftover"}, clicked=["story_run"]))
-        self.assertEqual((rs.call_args[1]["provider"], rs.call_args[1]["api_key"]), ("offline", None))
-
-    def test_result_for_another_mode_is_not_shown(self):
-        f = FakeSt({"lab_mode": "Script2Video"})
-        f.session_state["story_result"] = {**STORY, "mode": "idea2video"}
-        run_app(f)
-        self.assertEqual(f.names("video"), [])
-
-    def test_episode_cards_and_drive_links(self):
-        res = {**STORY, "mode": "idea2video", "drive_links": ["https://drive/1", "https://drive/2"],
-               "episodes_out": [{"episode": i, "title": "T", "video_path": f"/tmp/e{i}.mp4", "shots": 3, "seconds": 9.0,
-                                 "drive_link": f"https://drive/{i}", "project_link": f"https://drive/p{i}"} for i in (1, 2)]}
+class ResultCardTests(unittest.TestCase):
+    def render(self, clip=None, **extra):
+        res = {**VUGOLA, **extra, "clips": [{**CLIP, **(clip or {})}]}
         f = FakeSt()
-        f.session_state["story_result"] = res
-        run_app(f)
-        self.assertEqual([c[1][0] for c in f.names("video")], ["/tmp/e1.mp4", "/tmp/e2.mp4"])
-        self.assertEqual(len(f.names("link_button")), 4)
+        f.session_state["vugola_result"] = res
+        return run_app(f)
 
-    def test_pipeline_error_is_shown(self):
-        with mock.patch.object(pipeline, "run_story_pipeline", side_effect=ValueError("bad text")):
-            f = run_app(FakeSt({"story_text_idea2video": "x"}, clicked=["story_run"]))
-        self.assertTrue(any("bad text" in c[1][0] for c in f.names("error")))
+    def test_copyable_caption_tabs_for_every_platform(self):
+        f = self.render()
+        self.assertEqual(f.tab_labels, ["▶ YouTube Shorts", "📸 Instagram Reels", "👍 Facebook Reels"])
+        codes = [c[1][0] for c in f.names("code")]
+        for expected in ("Eat more protein", "IG TEXT", "FB TEXT", "protein, Shorts"):
+            self.assertIn(expected, codes)
+
+    def test_status_badges_and_subtitle_files(self):
+        f = self.render()
+        html_ = " ".join(str(c[1][0]) for c in f.names("markdown"))
+        self.assertIn("subtitled", html_)
+        self.assertIn("♪ music", html_)
+        self.assertIn("backed up", html_)
+        self.assertTrue(any("c1.srt" in c[1][0] for c in f.names("caption")))
+        f = self.render({"subtitled": False, "music_mixed": False, "drive_link": None})
+        html_ = " ".join(str(c[1][0]) for c in f.names("markdown"))
+        self.assertIn("no subtitles", html_)
+        self.assertIn("local only", html_)
+        self.assertNotIn("♪ music", html_)
+
+    def test_music_credit_and_licence_note(self):
+        f = self.render(music={"title": "Lofi beat", "channel": "Chill", "url": "https://youtu.be/a1", "licence_note": "CHECK LICENCE"})
+        info = " ".join(c[1][0] for c in f.names("info"))
+        self.assertIn("Lofi beat", info)
+        self.assertIn("CHECK LICENCE", info)
+
+    def test_demo_mode_shows_sample_cards(self):
+        f = FakeSt()
+        f.query_params = {"demo": "1"}
+        f = run_app(f)
+        self.assertEqual(len(f.names("code")) >= 3, True)
 
 
-class ViewmaxTabTests(unittest.TestCase):
-    def test_run_calls_pipeline(self):
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
-            f = run_app(ClassicFake({"viewmax_prompt": "a script about tea", "drive_folder_id": "FOLDER",
-                                "viewmax_voice": "en-GB-RyanNeural"}, clicked=["viewmax_run"]))
-        args, kw = rv.call_args
-        self.assertEqual(args, ("a script about tea", "FOLDER"))
-        self.assertIsNone(kw["background_video"])
-        self.assertEqual(kw["voice"], "en-GB-RyanNeural")
-        self.assertEqual(f.names("audio")[0][1][0], "/tmp/a.mp3")
-        self.assertEqual(f.names("video")[0][1][0], "/tmp/v.mp4")
-        self.assertEqual(f.names("link_button")[0][1][1], "https://drive/v")
+class MusicPanelTests(unittest.TestCase):
+    def test_scan_button_lists_tracks_and_stores_them(self):
+        with mock.patch.object(music_finder, "scan_trending_music", return_value=TRACKS) as scan:
+            f = run_app(FakeSt({"music_on": True, "music_query": "lofi chill"}, clicked=["music_scan"]))
+        scan.assert_called_once_with("lofi chill", limit=5)
+        self.assertEqual(f.session_state["music_tracks"], TRACKS)
+        radio = f.names("radio")[0]
+        self.assertEqual(radio[2]["key"], "music_pick")
+        self.assertEqual(len(radio[2]["options"]), 2)
 
-    def test_background_upload_forwarded(self):
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
-            run_app(ClassicFake({"viewmax_prompt": "p", "viewmax_bg": FakeUpload()}, clicked=["viewmax_run"]))
-        self.assertTrue(rv.call_args[1]["background_video"].endswith("my clip.mp4"))
+    def test_scan_is_disabled_until_music_is_switched_on(self):
+        f = run_app(FakeSt())
+        scan = [c for c in f.names("button") if c[2]["key"] == "music_scan"][0]
+        self.assertEqual(scan[2].get("disabled"), True)
 
-    def test_avatar_controls_exist(self):
-        f = run_app(ClassicFake())
-        boxes = [c for c in f.names("checkbox") if c[2]["key"] == "viewmax_avatar_on"]
-        self.assertEqual(boxes[0][1][0], "Enable AI Avatar Lip-Sync Commentary")
-        up = [c for c in f.names("file_uploader") if c[2]["key"] == "viewmax_avatar"]
-        self.assertEqual(up[0][2]["type"], ["glb", "vrm", "jpg", "jpeg", "png"])
+    def test_scan_failure_is_shown_as_a_warning(self):
+        with mock.patch.object(music_finder, "scan_trending_music", side_effect=music_finder.MusicError("Could not reach YouTube")):
+            f = run_app(FakeSt({"music_on": True}, clicked=["music_scan"]))
+        self.assertTrue(any("Could not reach YouTube" in c[1][0] for c in f.names("warning")))
+        self.assertNotIn("music_tracks", f.session_state)
 
-    def test_avatar_off_sends_no_avatar_args(self):
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
-            run_app(ClassicFake({"viewmax_prompt": "p", "viewmax_avatar": FakeUpload()}, clicked=["viewmax_run"]))
-        self.assertNotIn("avatar_image", rv.call_args[1])
-        self.assertNotIn("avatar_enabled", rv.call_args[1])
-
-    def test_avatar_on_forwards_image(self):
-        up = FakeUpload()
-        up.name = "me.png"
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
-            run_app(ClassicFake({"viewmax_prompt": "p", "viewmax_avatar_on": True, "viewmax_avatar": up},
-                           clicked=["viewmax_run"]))
-        kw = rv.call_args[1]
-        self.assertTrue(kw["avatar_enabled"])
-        self.assertTrue(kw["avatar_image"].endswith("me.png"))
-
-    def test_avatar_on_without_file_uses_the_builtin_3d_avatar(self):
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
-            run_app(ClassicFake({"viewmax_prompt": "p", "viewmax_avatar_on": True, "viewmax_model_type": "Anime"},
-                           clicked=["viewmax_run"]))
-        kw = rv.call_args[1]
-        self.assertEqual((kw["avatar_image"], kw["avatar_type"]), ("demo:anime", "anime"))
-
-    def test_podcast_layout_controls_exist_and_are_forwarded(self):
-        f = run_app(ClassicFake())
-        labels = [c[1][0] for c in f.names("selectbox")]
-        for needle in ("Model type", "Avatar position", "Render quality"):
-            self.assertTrue(any(needle in l for l in labels), needle)
-        sel = [c for c in f.names("selectbox") if c[2]["key"] == "viewmax_model_type"]
-        self.assertTrue(sel)
-        up = FakeUpload()
-        up.name = "host.glb"
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
-            run_app(ClassicFake({"viewmax_prompt": "p", "viewmax_avatar_on": True, "viewmax_avatar": up,
-                            "viewmax_model_type": "Photorealistic Human", "viewmax_position": "Top-Left",
-                            "viewmax_scale": 30, "viewmax_gestures": False,
-                            "viewmax_quality": "Fast (low-spec laptops)"}, clicked=["viewmax_run"]))
-        kw = rv.call_args[1]
-        self.assertTrue(kw["avatar_image"].endswith("host.glb"))
-        self.assertEqual((kw["avatar_type"], kw["avatar_position"], kw["avatar_scale"], kw["avatar_gestures"],
-                          kw["avatar_quality"]), ("human", "Top-Left", 0.30, False, "fast"))
-        self.assertNotIn("avatar_xy", kw)
-
-    def test_custom_coordinates_show_x_y_and_are_forwarded(self):
-        inputs = {"viewmax_prompt": "p", "viewmax_avatar_on": True, "viewmax_position": "Custom Coordinates",
-                  "viewmax_x": 120, "viewmax_y": 800}
-        f = run_app(ClassicFake(inputs))
-        self.assertEqual({c[2]["key"] for c in f.names("number_input") if c[2]["key"].startswith("viewmax")}, {"viewmax_x", "viewmax_y"})
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
-            run_app(ClassicFake(inputs, clicked=["viewmax_run"]))
-        self.assertEqual(rv.call_args[1]["avatar_xy"], (120, 800))
-
-    def test_x_y_hidden_for_corner_presets(self):
-        f = run_app(ClassicFake({"viewmax_avatar_on": True, "viewmax_position": "Bottom-Left"}))
-        self.assertEqual([c for c in f.names("number_input") if c[2]["key"].startswith("viewmax")], [])
-
-    def test_layout_preview_is_shown_only_when_the_avatar_is_on(self):
-        self.assertFalse(any("Layout preview" in str(c) for c in run_app(ClassicFake()).names("image")))
-        f = run_app(ClassicFake({"viewmax_avatar_on": True}))
-        self.assertTrue(any("Layout preview" in str(c) for c in f.names("image")))
-
-    def test_3d_result_tiles(self):
-        res = {**VIEWMAX, "avatar": {"mode": "3d", "layout": {"preset": "Top-Right"}, "gestures": [{"name": "wave"}]}}
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=res):
-            f = run_app(ClassicFake({"viewmax_prompt": "p"}, clicked=["viewmax_run"]))
-        text = " ".join(str(c) for c in f.names("markdown"))
-        for needle in ("Avatar position", "Top-Right", "Gestures played"):
-            self.assertIn(needle, text)
-
-    def test_legacy_card_layout_string_does_not_crash_the_tiles(self):
-        res = {**VIEWMAX, "avatar": {"mode": "mouth-warp", "layout": "full"}}
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=res):
-            f = run_app(ClassicFake({"viewmax_prompt": "p"}, clicked=["viewmax_run"]))
-        text = " ".join(str(c) for c in f.names("markdown"))
-        self.assertIn("Mouth sync", text)
-        self.assertNotIn("Avatar position", text)
-
-    def test_avatar_result_badge(self):
-        res = {**VIEWMAX, "avatar": {"mode": "pulse"}}
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=res):
-            f = run_app(ClassicFake({"viewmax_prompt": "p"}, clicked=["viewmax_run"]))
-        self.assertTrue(any("Avatar animation" in str(c) for c in f.names("markdown")))
-
-    def test_script_actions_and_ocr_options_are_forwarded(self):
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
-            run_app(ClassicFake({"viewmax_script": "My own words.", "viewmax_actions": "Zoom in then pan right",
-                            "viewmax_read_text": True, "viewmax_bg": FakeUpload()}, clicked=["viewmax_run"]))
-        kw = rv.call_args[1]
-        self.assertEqual((kw["custom_script"], kw["action_prompt"], kw["read_background_text"]),
-                         ("My own words.", "Zoom in then pan right", True))
-
-    def test_ocr_reader_captions_music_and_backdrop_controls(self):
-        f = run_app(ClassicFake())
-        keys = {c[2]["key"] for c in f.names("selectbox")} | {c[2]["key"] for c in f.names("checkbox")} | {
-            c[2]["key"] for c in f.names("file_uploader")}
-        for key in ("viewmax_ocr_backend", "viewmax_show_text", "viewmax_music", "viewmax_backdrop"):
-            self.assertIn(key, keys)
-        music = FakeUpload()
-        music.name = "bed.mp3"
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
-            run_app(ClassicFake({"viewmax_prompt": "p", "viewmax_read_text": True, "viewmax_ocr_backend": "PaddleOCR",
-                            "viewmax_show_text": False, "viewmax_music": music, "viewmax_backdrop": "Sunset"},
-                           clicked=["viewmax_run"]))
-        kw = rv.call_args[1]
-        self.assertEqual((kw["ocr_backend"], kw["show_screen_text"], kw["broll_style"]), ("paddleocr", False, "sunset"))
-        self.assertTrue(kw["music_path"].endswith("bed.mp3"))
-
-    def test_clip_tab_ocr_reader_is_forwarded(self):
+    def test_chosen_track_volume_and_ducking_reach_the_pipeline(self):
+        f = FakeSt({"vugola_url": "u", "music_on": True, "music_volume": 25, "music_duck": False, "music_pick": 1},
+                   clicked=["vugola_run"])
+        f.session_state["music_tracks"] = TRACKS
         with mock.patch.object(pipeline, "run_vugola_pipeline", return_value=VUGOLA) as rv:
-            run_app(ClipFake({"vugola_url": "http://x/y.mp4", "vugola_ocr": True, "vugola_ocr_backend": "PaddleOCR"},
-                           clicked=["vugola_run"]))
-        self.assertEqual(rv.call_args[1]["ocr_backend"], "paddleocr")
+            run_app(f)
+        cfg = rv.call_args.kwargs["music"]
+        self.assertTrue(cfg["enabled"])
+        self.assertEqual(cfg["volume"], 0.25)
+        self.assertFalse(cfg["duck"])
+        self.assertEqual(cfg["track"]["id"], "b2")
+        self.assertTrue(cfg["cache_dir"].replace("\\", "/").endswith("storage/music_cache"))
 
-    def test_defaults_do_not_send_optional_render_arguments(self):
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
-            run_app(ClassicFake({"viewmax_prompt": "p"}, clicked=["viewmax_run"]))
-        for k in ("ocr_backend", "show_screen_text", "music_path", "broll_style"):
-            self.assertNotIn(k, rv.call_args[1])
+    def test_own_music_file_wins_over_the_scan(self):
+        seen = {}
 
-    def test_motion_css_is_gsap_style_and_respects_reduced_motion(self):
-        css = Path(APP).read_text(encoding="utf-8")
-        for needle in ("cubic-bezier(.215,.61,.355,1)", "cubic-bezier(.34,1.56,.64,1)", "@keyframes cp-rise",
-                       "prefers-reduced-motion"):
-            self.assertIn(needle, css)
+        def fake_pipeline(source, *a, **k):
+            m = k["music"]
+            seen.update(path=m["path"], data=Path(m["path"]).read_bytes(), has_track="track" in m)
+            return VUGOLA
 
-    def test_custom_script_alone_is_enough_without_a_prompt(self):
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
-            f = run_app(ClassicFake({"viewmax_script": "Just my script."}, clicked=["viewmax_run"]))
-        rv.assert_called_once()
-        self.assertFalse([c for c in f.names("warning") if "prompt" in c[1][0].lower()])
+        f = FakeSt({"vugola_url": "u", "music_on": True, "music_file": FakeUpload("bgm.mp3", b"audio")}, clicked=["vugola_run"])
+        f.session_state["music_tracks"] = TRACKS
+        with mock.patch.object(pipeline, "run_vugola_pipeline", side_effect=fake_pipeline):
+            run_app(f)
+        self.assertEqual(seen["data"], b"audio")
+        self.assertFalse(seen["has_track"])
+        self.assertFalse(Path(seen["path"]).exists())
 
-    def test_unused_options_are_not_sent(self):
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
-            run_app(ClassicFake({"viewmax_prompt": "p"}, clicked=["viewmax_run"]))
-        for k in ("custom_script", "action_prompt", "read_background_text"):
-            self.assertNotIn(k, rv.call_args[1])
-
-    def test_lab_uploads_are_deleted_after_the_run(self):
-        paths = []
-
-        def fake(prompt, folder, background_video=None, **k):
-            paths.append(background_video)
-            self.assertTrue(Path(background_video).exists())
-            return VIEWMAX
-
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", side_effect=fake):
-            run_app(ClassicFake({"viewmax_prompt": "p", "viewmax_bg": FakeUpload()}, clicked=["viewmax_run"]))
-        self.assertFalse(Path(paths[0]).exists())
-
-    def test_shot_list_and_screen_text_are_shown(self):
-        res = {**VIEWMAX, "screen_text": ["SALE 50%"],
-               "script": {**VIEWMAX["script"], "shot_list": ["0.0s  zoom in: Zoom in"]}, "cues_applied": 1}
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=res):
-            f = run_app(ClassicFake({"viewmax_prompt": "p"}, clicked=["viewmax_run"]))
-        text = " ".join(str(c) for c in f.names("markdown"))
-        self.assertIn("SALE 50%", text)
-        self.assertIn("Zoom in", text)
-        self.assertIn("Visual actions", text)
-
-    def test_ocr_checkbox_is_forwarded_and_screen_text_chips_shown(self):
-        clip = {**CLIP, "screen_text": ["BIG SALE"]}
-        res = {**VUGOLA, "clips": [clip]}
-        with mock.patch.object(pipeline, "run_vugola_pipeline", return_value=res) as rv:
-            f = run_app(ClipFake({"vugola_url": "https://youtu.be/x", "vugola_ocr": True}, clicked=["vugola_run"]))
-        self.assertTrue(rv.call_args[1]["read_screen_text"])
-        self.assertIn("BIG SALE", " ".join(str(c) for c in f.names("markdown")))
-
-    def test_empty_prompt_warns(self):
-        with mock.patch.object(pipeline, "run_viewmax_pipeline") as rv:
-            f = run_app(ClassicFake(clicked=["viewmax_run"]))
-        rv.assert_not_called()
-        self.assertTrue(any("prompt" in c[1][0].lower() for c in f.names("warning")))
-
-    def test_pipeline_error_is_shown(self):
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", side_effect=RuntimeError("tts down")):
-            f = run_app(ClassicFake({"viewmax_prompt": "p"}, clicked=["viewmax_run"]))
-        self.assertTrue(any("tts down" in c[1][0] for c in f.names("error")))
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_track_label_is_readable(self):
+        import runpy as _r
+        with mock.patch.dict(sys.modules, {"streamlit": FakeSt()}):
+            ns = _r.run_path(str(APP), run_name="not_main")
+        label = ns["_track_label"](TRACKS[0])
+        self.assertIn("2.5M views", label)
+        self.assertIn("2:30", label)
+        self.assertIn("Lofi beat", label)
 
 
 class MemePanelTests(unittest.TestCase):
@@ -626,25 +397,21 @@ class MemePanelTests(unittest.TestCase):
         else:
             os.environ["CINEPULSE_MEMES"] = self._old
 
-    def test_toggle_is_present_in_every_generating_mode_and_off_by_default(self):
-        for inputs, prefix in (({"lab_mode": "Clip Repurposer"}, "vugola"), ({"idea_flavor": "Narrated video with a 3D avatar (classic)"}, "viewmax"),
-                               ({}, "story"), ({"lab_mode": "Script2Video"}, "story"), ({"lab_mode": "Novel2Video"}, "story")):
-            f = FakeSt(inputs)
-            if prefix == "story":  # the story modes show it in wizard step 3
-                mode = {"Script2Video": "script2video", "Novel2Video": "novel2video"}.get(inputs.get("lab_mode"), "idea2video")
-                f.session_state[f"wiz_{mode}"] = wizard_state(tempfile.mkdtemp(), 3, mode, fill=True)
-            f = run_app(f)
-            boxes = [c for c in f.names("checkbox") if c[2]["key"] == f"{prefix}_meme_on"]
-            self.assertEqual(len(boxes), 1, inputs)
-            self.assertEqual(boxes[0][1][0], "Enable Contextual Meme Reactions")
-            ups = [c for c in f.names("file_uploader") if c[2]["key"] == f"{prefix}_meme_up"]
-            self.assertEqual(len(ups), 1)
+    def test_toggle_is_present_and_off_by_default(self):
+        f = run_app(FakeSt())
+        boxes = [c for c in f.names("checkbox") if c[2]["key"] == "vugola_meme_on"]
+        self.assertEqual(len(boxes), 1)
+        self.assertEqual(boxes[0][1][0], "Enable Contextual Meme Reactions")
+        self.assertEqual(len([c for c in f.names("file_uploader") if c[2]["key"] == "vugola_meme_up"]), 1)
+        with mock.patch.object(pipeline, "run_vugola_pipeline", return_value=VUGOLA) as rv:
+            run_app(FakeSt({"vugola_url": "u"}, clicked=["vugola_run"]))
+        self.assertIsNone(rv.call_args.kwargs["memes"])
 
     def test_clip_run_forwards_meme_settings(self):
         with mock.patch.object(pipeline, "run_vugola_pipeline", return_value=VUGOLA) as rv:
-            run_app(ClipFake({"vugola_url": "https://youtu.be/x", "vugola_meme_on": True, "vugola_meme_mode": "Corner tile only",
-                              "vugola_meme_rate": 6, "vugola_meme_pos": "Custom Coordinates", "vugola_meme_x": 11,
-                              "vugola_meme_y": 22}, clicked=["vugola_run"]))
+            run_app(FakeSt({"vugola_url": "https://youtu.be/x", "vugola_meme_on": True, "vugola_meme_mode": "Corner tile only",
+                            "vugola_meme_rate": 6, "vugola_meme_pos": "Custom Coordinates", "vugola_meme_x": 11,
+                            "vugola_meme_y": 22}, clicked=["vugola_run"]))
         cfg = rv.call_args.kwargs["memes"]
         self.assertTrue(cfg["enabled"])
         self.assertEqual(cfg["mode"], "overlay")
@@ -652,22 +419,11 @@ class MemePanelTests(unittest.TestCase):
         self.assertEqual(cfg["position"], "Custom Coordinates")
         self.assertEqual(cfg["xy"], (11, 22))
 
-    def test_off_sends_none_and_classic_forwards_when_on(self):
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
-            run_app(ClassicFake({"viewmax_prompt": "hi"}, clicked=["viewmax_run"]))
-        self.assertIsNone(rv.call_args.kwargs["memes"])
-        with mock.patch.object(pipeline, "run_viewmax_pipeline", return_value=VIEWMAX) as rv:
-            run_app(ClassicFake({"viewmax_prompt": "hi", "viewmax_meme_on": True}, clicked=["viewmax_run"]))
-        cfg = rv.call_args.kwargs["memes"]
-        self.assertTrue(cfg["enabled"])
-        self.assertNotIn("position", cfg)  # auto: avoid the avatar
-
     def test_upload_goes_into_the_meme_folder(self):
         import shutil
         import cv2
         import numpy as np
-        ff = shutil.which("ffmpeg")
-        if not ff:
+        if not shutil.which("ffmpeg"):
             self.skipTest("ffmpeg needed")
         src = Path(self.tmp) / "src.mp4"
         vw = cv2.VideoWriter(str(src), cv2.VideoWriter_fourcc(*"mp4v"), 10, (64, 64))
@@ -680,133 +436,10 @@ class MemePanelTests(unittest.TestCase):
 
             def getvalue(self):
                 return src.read_bytes()
-        f = ClipFake({"vugola_meme_up": [Up()], "vugola_meme_emo": "laugh"}, clicked=["vugola_meme_add"])
+        f = FakeSt({"vugola_meme_up": [Up()], "vugola_meme_emo": "laugh"}, clicked=["vugola_meme_add"])
         run_app(f)
         self.assertTrue(list(Path(self.tmp, "laugh").glob("lol*.mp4")), f.names("error"))
 
 
-class WizardTests(unittest.TestCase):
-    def setUp(self):
-        import os
-        self.tmp = tempfile.mkdtemp()
-        self._old = os.environ.get("CINEPULSE_MEMES")
-        os.environ["CINEPULSE_MEMES"] = os.path.join(self.tmp, "memes")
-        self.folder = os.path.join(self.tmp, "assets")
-
-    def tearDown(self):
-        import os
-        import shutil
-        shutil.rmtree(self.tmp, ignore_errors=True)
-        if self._old is None:
-            os.environ.pop("CINEPULSE_MEMES", None)
-        else:
-            os.environ["CINEPULSE_MEMES"] = self._old
-
-    def app(self, step, inputs=None, clicked=(), fill=False, mode="script2video"):
-        f = FakeSt({"lab_mode": "Script2Video", **(inputs or {})}, clicked=clicked)
-        f.session_state[f"wiz_{mode}"] = wizard_state(self.folder, step, mode, fill)
-        return run_app(f), f.session_state[f"wiz_{mode}"]
-
-    def test_step1_is_the_default_and_has_no_render_controls(self):
-        f = run_app(FakeSt({"lab_mode": "Script2Video"}))
-        labels = [c[1][0] for c in f.names("button")]
-        self.assertIn("Parse the story and continue", labels)
-        self.assertNotIn("Render the episode", labels)
-        self.assertTrue(any("Story &amp; script" in str(c[1][0]) for c in f.names("markdown")))
-
-    def test_step2_shows_a_card_per_character_and_location(self):
-        f, _ = self.app(2)
-        keys = {c[2]["key"] for n in ("text_area", "file_uploader", "button") for c in f.names(n)}
-        for cid in ("char_Maya", "char_Bob", "loc_kitchen", "loc_street"):
-            self.assertIn(f"asset_prompt_script2video_{cid}", keys)
-            self.assertIn(f"asset_up_script2video_{cid}", keys)
-            self.assertIn(f"asset_gen_script2video_{cid}", keys)
-        self.assertIn("asset_gen_all", keys)
-        self.assertTrue(any("Generate Reference Visuals" == c[1][0] for c in f.names("button")))
-
-    def test_generate_all_fills_the_book(self):
-        _, wiz = self.app(2, clicked=["asset_gen_all"], inputs={"asset_backend_script2video": "Built-in painter (offline, simple flat art)"})
-        book = pipeline.asset_manager.AssetBook.load(self.folder)
-        self.assertTrue(book.ready())
-        self.assertEqual(set(wiz["plan"]["asset_gate"]["required"]), set(book.cards))
-
-    def test_upload_attaches_a_picture_and_bad_files_are_rejected(self):
-        import cv2
-        import numpy as np
-        ok, png = cv2.imencode(".png", np.full((200, 100, 3), 120, np.uint8))
-        good = FakeUpload("maya.png", png.tobytes())
-        good.getvalue = lambda: png.tobytes()
-        _, _ = self.app(2, inputs={"asset_up_script2video_char_Maya": good})
-        book = pipeline.asset_manager.AssetBook.load(self.folder)
-        self.assertEqual(book.cards["char:Maya"]["source"], "upload")
-        bad = FakeUpload("x.png", b"not an image")
-        bad.getvalue = lambda: b"not an image"
-        f, _ = self.app(2, inputs={"asset_up_script2video_loc_kitchen": bad})
-        self.assertTrue(any("could not be read" in c[1][0] for c in f.names("error")))
-        self.assertIn("loc:kitchen", pipeline.asset_manager.AssetBook.load(self.folder).missing())
-
-    def test_the_gate_stays_closed_until_every_card_has_a_picture(self):
-        f, wiz = self.app(2, clicked=["wiz_to3"])
-        self.assertEqual(wiz["step"], 2)
-        self.assertTrue(any("asset gate is closed" in c[1][0] for c in f.names("error")))
-
-    def test_closing_the_gate_moves_to_step3_with_locked_assets_in_the_preview(self):
-        f, wiz = self.app(2, clicked=["wiz_to3"], fill=True)
-        self.assertEqual(wiz["step"], 3)
-        self.assertFalse(wiz["plan"]["asset_gate"]["open"])
-        f, _ = self.app(3, fill=True)
-        self.assertGreaterEqual(len(f.names("image")), 4)  # location + character thumbnails
-        self.assertIn("Render the episode", [c[1][0] for c in f.names("button")])
-
-    def test_step3_render_passes_the_locked_book_and_shows_the_result(self):
-        res = {**STORY, "mode": "script2video"}
-        with mock.patch.object(pipeline, "run_story_pipeline", return_value=res) as rs:
-            f, wiz = self.app(3, clicked=["wiz_render"], fill=True, inputs={"story_voice": True, "story_meme_on": True})
-        kw = rs.call_args[1]
-        self.assertTrue(kw["render"] and kw["voice"])
-        self.assertIs(kw["plan_result"], wiz["plan"])
-        self.assertTrue(kw["asset_book"].ready())
-        self.assertTrue(kw["memes"]["enabled"])
-        self.assertEqual(kw["mode"], "script2video")
-        self.assertEqual(wiz["step"], 4)
-        self.assertEqual(f.session_state["story_result"], res)
-
-    def test_step3_has_a_visual_style_switch_defaulting_to_2d(self):
-        res = {**STORY, "mode": "script2video"}
-        with mock.patch.object(pipeline, "run_story_pipeline", return_value=res) as rs:
-            f, _ = self.app(3, clicked=["wiz_render"], fill=True)
-        radio = f.names("radio")[0]
-        self.assertEqual(radio[2]["key"], "visual_mode_script2video")
-        self.assertEqual(radio[2]["options"], ["2D Cinematic Composition Mode", "Generative AI Video Mode"])
-        kw = rs.call_args[1]
-        self.assertEqual(kw["visual_mode"], "2d")
-        self.assertNotIn("video_backend_script2video", [c[2]["key"] for c in f.names("selectbox")])  # no model picker in 2D mode
-
-    def test_generative_mode_is_passed_to_the_pipeline_with_backend_and_key(self):
-        res = {**STORY, "mode": "script2video"}
-        inputs = {"visual_mode_script2video": "Generative AI Video Mode",
-                  "video_backend_script2video": "pollinations.ai video (API key, mostly paid)",
-                  "video_key_script2video": "  sk-test  "}
-        with mock.patch.object(pipeline, "run_story_pipeline", return_value=res) as rs:
-            f, _ = self.app(3, clicked=["wiz_render"], fill=True, inputs=inputs)
-        kw = rs.call_args[1]
-        self.assertEqual((kw["visual_mode"], kw["video_backend"], kw["video_api_key"]), ("generative", "pollinations", "sk-test"))
-        self.assertIn("video_backend_script2video", [c[2]["key"] for c in f.names("selectbox")])
-        self.assertTrue(any("pollinations" in str(c[1][0]) for c in f.names("markdown")))
-
-    def test_generative_mode_warns_when_no_model_is_ready(self):
-        import generative_video
-
-        none_ready = [{"backend": b, "ready": False, "detail": "not installed"} for b in ("ltx", "svd", "pollinations")]
-        with mock.patch.object(generative_video, "capabilities", return_value=none_ready):
-            f, _ = self.app(3, fill=True, inputs={"visual_mode_script2video": "Generative AI Video Mode"})
-        self.assertTrue(any("fall back to the 2D" in str(c[1][0]) for c in f.names("warning")))
-
-    def test_start_over_and_back_buttons(self):
-        _, wiz = self.app(2, clicked=["wiz_back1"])
-        self.assertEqual(wiz["step"], 1)
-        f = FakeSt({"lab_mode": "Script2Video"}, clicked=["wiz_reset"])
-        f.session_state["wiz_script2video"] = wizard_state(self.folder, 2)
-        run_app(f)
-        self.assertNotIn("wiz_script2video", f.session_state)
-
+if __name__ == "__main__":
+    unittest.main()

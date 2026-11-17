@@ -438,7 +438,7 @@ class DriveBackup:
 
 def backup_files(paths, folder_id: str, upload_fn: Optional[Callable[[str, str], str]] = None,
                  attempts: int = 3, base_delay: float = 2.0, sleep: Callable[[float], None] = time.sleep) -> dict:
-    """Back up several finished files (e.g. every episode of a story and its project archive) to one Drive folder.
+    """Back up several finished files (e.g. every finished clip and its subtitle files) to one Drive folder.
 
     Returns {"links": {path: link}, "errors": {path: message}}. One failing file never stops the others and never
     touches the local copy; missing paths are reported as errors. Uploads run one at a time on a single background
@@ -467,8 +467,8 @@ def backup_files(paths, folder_id: str, upload_fn: Optional[Callable[[str, str],
 
 
 def collect_final_videos(result: dict) -> list:
-    """Every FINISHED video a pipeline result points to (clips, the classic generator's video, story episodes) -
-    the files that already contain meme reactions / the 3D avatar and are what gets backed up to Google Drive.
+    """Every FINISHED video a pipeline result points to (the finished clips) -
+    the files that already contain subtitles, meme reactions and music, which are what gets backed up to Google Drive.
     Existing files only, no duplicates, in order."""
     found: list = []
     for key in ("video_path", "output_path"):
@@ -477,9 +477,6 @@ def collect_final_videos(result: dict) -> list:
     for clip in result.get("clips") or []:
         if clip.get("output_path"):
             found.append(clip["output_path"])
-    for ep in result.get("episodes_out") or []:
-        if ep.get("video_path"):
-            found.append(ep["video_path"])
     seen, out = set(), []
     for p in found:
         p = str(p)
@@ -489,18 +486,9 @@ def collect_final_videos(result: dict) -> list:
     return out
 
 
-def collect_asset_files(book) -> list:
-    """The pre-production assets worth keeping on Drive: every character sheet / location picture that exists on
-    disk, plus the prompt cards (assets.json). `book` is an asset_manager.AssetBook."""
-    files = [p for p in book.image_paths() if os.path.isfile(p)]
-    card_file = os.path.join(str(book.folder), "assets.json")
-    if os.path.isfile(card_file):
-        files.append(card_file)
-    return files
-
 
 def zip_folder(folder: str, zip_path: str, skip=("work",)) -> str:
-    """Zip a project folder (script, storyboard, characters, graph, subtitles...) for backup, leaving out the
+    """Zip a project folder (clips, subtitle files...) for backup, leaving out the
     scratch sub-folders named in `skip`. Returns zip_path."""
     import zipfile
 

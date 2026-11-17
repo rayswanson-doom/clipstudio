@@ -260,5 +260,100 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(os.listdir(outdir), [])  # no temp or partial files left
 
 
+
+def mean_volume(path, start=None, dur=None):
+    """Mean volume in dB of the audio (optionally a time window), via ffmpeg's volumedetect."""
+    cmd = [FFMPEG, "-hide_banner", "-nostats"] + (["-ss", str(start)] if start is not None else []) + \
+          (["-t", str(dur)] if dur is not None else []) + ["-i", path, "-vn", "-af", "volumedetect", "-f", "null", "-"]
+    err = subprocess.run(cmd, capture_output=True, text=True).stderr
+    import re
+    m = re.search(r"mean_volume: (-?[\d.]+) dB", err)
+    return float(m.group(1)) if m else -91.0
+
+
+@unittest.skipUnless(FFMPEG, "ffmpeg not installed")
+class BackgroundMusicTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.TemporaryDirectory()
+        d = cls.dir.name
+        cls.speech = os.path.join(d, "speech.mp4")  # 4 s: a loud tone for the first 2 s, then silence
+        subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:size=160x284:rate=10:duration=4",
+                        "-f", "lavfi", "-i", "sine=frequency=300:duration=2", "-filter_complex",
+                        "[1:a]volume=0.8,apad=whole_dur=4[a]", "-map", "0:v", "-map", "[a]", "-c:v", "libx264",
+                        "-pix_fmt", "yuv420p", "-c:a", "aac", cls.speech], check=True)
+        cls.silent = os.path.join(d, "silent.mp4")  # no audio stream at all
+        subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:size=160x284:rate=10:duration=3",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", cls.silent], check=True)
+        cls.music = os.path.join(d, "music.mp3")  # only 1 s long: it must be looped to cover the clip
+        subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=880:duration=1", cls.music], check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.dir.cleanup()
+
+    def out(self, name):
+        return os.path.join(self.dir.name, name)
+
+    def test_filter_graph_uses_loop_volume_amix_and_sidechain(self):
+        f = ve.build_music_filter(True, 0.15, True, 10.0)
+        for part in ("aloop=loop=-1:size=2e+09", "volume=0.150", "sidechaincompress", "amix=inputs=2:duration=first", "afade=t=in", "afade=t=out"):
+            self.assertIn(part, f)
+        plain = ve.build_music_filter(True, 0.15, False, 10.0)
+        self.assertNotIn("sidechaincompress", plain)
+        self.assertIn("amix=inputs=2:duration=first", plain)
+        self.assertNotIn("amix", ve.build_music_filter(False, 0.15, True, 5.0))
+        self.assertIn("volume=1.000", ve.build_music_filter(True, 7, True))   # clamped to 0..1
+        self.assertIn("volume=0.000", ve.build_music_filter(True, -1, True))
+
+    def test_mix_keeps_picture_and_audio_and_matches_the_clip_length(self):
+        res = ve.mix_background_music(self.speech, self.music, self.out("m1.mp4"), 0.2, True, FFMPEG)
+        self.assertTrue(res["ducked"])
+        info = probe(res["output_path"])
+        kinds = sorted(s["codec_type"] for s in info["streams"])
+        self.assertEqual(kinds, ["audio", "video"])
+        self.assertEqual(next(s for s in info["streams"] if s["codec_type"] == "video")["codec_name"], "h264")  # picture copied
+        self.assertAlmostEqual(float(info["format"]["duration"]), 4.0, delta=0.3)
+
+    def test_looped_music_fills_a_clip_longer_than_the_track(self):
+        out = self.out("m2.mp4")
+        ve.mix_background_music(self.speech, self.music, out, 0.5, False, FFMPEG)
+        tail = mean_volume(out, start=3.0, dur=1.0)  # the speech is silent here, the 1 s track would have ended long ago
+        self.assertGreater(tail, -60, "the music must keep playing after the track's own length")
+
+    def test_music_volume_is_respected(self):
+        quiet = ve.mix_background_music(self.silent, self.music, self.out("q.mp4"), 0.05, False, FFMPEG)["output_path"]
+        loud = ve.mix_background_music(self.silent, self.music, self.out("l.mp4"), 0.5, False, FFMPEG)["output_path"]
+        self.assertGreater(mean_volume(loud), mean_volume(quiet) + 10)
+
+    def test_video_without_audio_gets_the_music_alone(self):
+        res = ve.mix_background_music(self.silent, self.music, self.out("s.mp4"), 0.3, True, FFMPEG)
+        self.assertFalse(res["ducked"])
+        self.assertIn("audio", [s["codec_type"] for s in probe(res["output_path"])["streams"]])
+        self.assertAlmostEqual(float(probe(res["output_path"])["format"]["duration"]), 3.0, delta=0.3)
+
+    def test_music_ducks_under_the_speaker(self):
+        ducked = self.out("d.mp4")
+        flat = self.out("f.mp4")
+        ve.mix_background_music(self.speech, self.music, ducked, 0.5, True, FFMPEG)
+        ve.mix_background_music(self.speech, self.music, flat, 0.5, False, FFMPEG)
+        # in the silent second half only the music is left; with ducking it recovers to the same level as without
+        self.assertAlmostEqual(mean_volume(ducked, start=3.0, dur=1.0), mean_volume(flat, start=3.0, dur=1.0), delta=4.0)
+        # while the speaker talks the ducked mix leaves less music under the voice than the flat one
+        self.assertLess(mean_volume(ducked, start=0.3, dur=1.5), mean_volume(flat, start=0.3, dur=1.5) + 0.5)
+
+    def test_errors(self):
+        with self.assertRaises(FileNotFoundError):
+            ve.mix_background_music(self.speech, "/no/music.mp3", self.out("e.mp4"), ffmpeg_path=FFMPEG)
+        with self.assertRaises(FileNotFoundError):
+            ve.mix_background_music("/no/v.mp4", self.music, self.out("e.mp4"), ffmpeg_path=FFMPEG)
+        bad = self.out("bad.mp3")
+        Path(bad).write_bytes(b"not audio")
+        with self.assertRaises(RuntimeError) as cm:
+            ve.mix_background_music(self.speech, bad, self.out("e2.mp4"), ffmpeg_path=FFMPEG)
+        self.assertIn("background music", str(cm.exception))
+        self.assertFalse(Path(self.out("e2.mixing.mp4")).exists(), "no half-written file may be left behind")
+
+
 if __name__ == "__main__":
     unittest.main()

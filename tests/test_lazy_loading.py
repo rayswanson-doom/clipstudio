@@ -12,9 +12,8 @@ class LazyLoadingTests(unittest.TestCase):
     def test_importing_every_backend_module_loads_no_heavy_engine(self):
         code = (
             "import sys; sys.path.insert(0, 'backend')\n"
-            "import pipeline, transcriber, video_engine, avatar_sync, ocr_engine, visual_cues, scorer, tts_engine\n"
-            "import avatar_3d_engine, glb_model, soft_raster, lipsync_en, avatar_gestures, demo_avatars, render_engine\n"
-            "import vimax_orchestrator, novel_adapter, script_parser, dependency_graph, meme_matcher, asset_manager\n"
+            "import pipeline, transcriber, video_engine, ocr_engine, scorer, meme_matcher, uploader\n"
+            "import subtitle_engine, music_finder, social_metadata\n"
             f"bad = [m for m in {HEAVY!r} if m in sys.modules]\n"
             "print('LOADED:' + ','.join(bad))\n"
         )
@@ -22,16 +21,16 @@ class LazyLoadingTests(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(out.stdout.strip().splitlines()[-1], "LOADED:")
 
-    def test_3d_render_needs_no_heavy_engine(self):
+    def test_new_modules_use_their_heavy_libraries_only_when_called(self):
         code = (
-            "import sys, tempfile; sys.path.insert(0, 'backend')\n"
-            "import demo_avatars, avatar_3d_engine as e\n"
-            "p = demo_avatars.ensure_demo_avatars(tempfile.mkdtemp())['human']\n"
-            "m = e.G.load_model(p); r = e.Rig(m); R = e.Renderer(m, r, (96, 128), 'human', 1.0, 'bust')\n"
-            "R.render(r.solve(e.Pose()), {})\n"
-            f"print('LOADED:' + ','.join(x for x in {HEAVY!r} if x in sys.modules))\n"
+            "import sys; sys.path.insert(0, 'backend')\n"
+            "import subtitle_engine as se, music_finder as mf, social_metadata as sm\n"
+            "cues = se.cues_for_clip([{'word': w, 'start': i * .3, 'end': i * .3 + .25} for i, w in enumerate('one two three four five six'.split())], 0, 3)\n"
+            "se.cues_to_ass(cues); se.cues_to_srt(cues)\n"
+            "sm.generate_packages('Protein builds muscle fast.', use_llm='off')\n"
+            f"print('LOADED:' + ','.join(m for m in {HEAVY + ['yt_dlp', 'cv2']!r} if m in sys.modules))\n"
         )
-        out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True, timeout=180)
+        out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True, timeout=120)
         self.assertEqual(out.stdout.strip().splitlines()[-1] if out.stdout.strip() else out.stderr[-500:], "LOADED:")
 
     def test_availability_checks_do_not_import(self):

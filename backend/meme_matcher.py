@@ -177,7 +177,7 @@ LLM_SCHEMA = {"tags": [{"idx": int, "emotion": str, "intensity": (int, float)}]}
 
 
 def analyze_with_llm(client, texts: Sequence[str]) -> List[Optional[dict]]:
-    """Groq / Gemini structured-JSON emotion tags (vimax_orchestrator clients). One entry per text, None where the
+    """Groq / Gemini structured-JSON emotion tags (free-tier, key from the environment). One entry per text, None where the
     model gave nothing usable (the caller then uses analyze_text). Never raises."""
     out: List[Optional[dict]] = [None] * len(texts)
     if client is None or getattr(client, "offline", True) or not texts:
@@ -243,16 +243,6 @@ def segments_from_words(words: Sequence[dict], start: float = 0.0, end: Optional
     return [s for s in out if s["text"] and s["end"] > s["start"]]
 
 
-def segments_from_shots(shots: Sequence[dict]) -> List[dict]:
-    """Story storyboard shots -> segments: what is said (or, failing that, what happens) with the shot's timing."""
-    out = []
-    for s in shots:
-        text = s.get("line") or s.get("action") or ""
-        if text.strip():
-            out.append({"start": float(s["start"]), "end": float(s["end"]), "text": text.strip(), "shot": s.get("idx")})
-    return out
-
-
 # --------------------------------------------------------------------------- #
 # settings + locations
 # --------------------------------------------------------------------------- #
@@ -264,7 +254,7 @@ class MemeSettings:
     sensitivity: float = 0.5        # 0 = only the strongest reactions ... 1 = react to almost everything
     use_audio: bool = True          # play the meme's own sound
     volume: float = 0.7
-    position: str = "auto"          # corner for overlays; "auto" avoids the avatar and other memes
+    position: str = "auto"          # corner for overlays; "auto" avoids other memes
     xy: Optional[Tuple[float, float]] = None
     scale: float = 0.34             # overlay width / video width
     max_seconds: float = 3.5        # longest stretch of one meme that is used
@@ -532,17 +522,47 @@ class MemeLibrary:
 # --------------------------------------------------------------------------- #
 # matching
 # --------------------------------------------------------------------------- #
+_STOPWORDS = frozenset("""a about above after again all also am an and any are as at be because been before being below between both but by
+can could did do does doing down during each few for from further had has have having he her here hers herself him himself his how i if in into
+is it its itself just me more most my myself no nor not now of off on once only or other our ours ourselves out over own same she should so some
+such than that the their theirs them themselves then there these they this those through to too under until up very was we were what when where
+which while who whom why will with would you your yours yourself yourselves said asked replied""".split())
+
+
+class HashingEmbedder:
+    """Deterministic CPU text embedder: signed feature hashing of unigrams + bigrams (stop-words removed), sub-linear term
+    frequency, L2-normalised. No model, no download, no extra package."""
+
+    name = "hashed-bow"
+    dim = 384
+
+    def encode(self, texts):
+        import math
+        import zlib
+        from collections import Counter
+
+        import numpy as np
+
+        out = np.zeros((len(texts), self.dim), dtype=np.float32)
+        for r, text in enumerate(texts):
+            toks = [t for t in re.findall(r"[a-z][a-z']+", str(text).casefold()) if t not in _STOPWORDS and len(t) > 2]
+            feats = toks + [a + "_" + b for a, b in zip(toks, toks[1:])]
+            for f, c in Counter(feats).items():
+                h = zlib.crc32(f.encode("utf-8"))
+                out[r, h % self.dim] += (1.0 if (h >> 16) & 1 else -1.0) * (1.0 + math.log(c))
+            n = float(np.linalg.norm(out[r]))
+            if n > 0:
+                out[r] /= n
+        return out
+
+
 _EMBEDDER = None
 
 
 def _embedder(prefer: str = "hashed"):
     global _EMBEDDER
     if _EMBEDDER is None:
-        try:
-            from . import novel_adapter as na
-        except ImportError:  # pragma: no cover
-            import novel_adapter as na
-        _EMBEDDER = na.get_embedder(prefer, [])
+        _EMBEDDER = HashingEmbedder()
     return _EMBEDDER
 
 
@@ -574,7 +594,7 @@ def plan_memes(segments: Sequence[dict], library: MemeLibrary, settings: Optiona
     {"matches": [...], "skipped": [{"segment","reason"}], "analysis": [...], "warnings": [...]}.
     Each match: segment, start, end (when on screen), duration, text, emotion, intensity, meme_path, meme_rel, meme_name,
     score, mode ("overlay" | "cutaway"), trim_start, use_audio, volume, position, xy, scale, reason.
-    clamp=True keeps every meme inside its own segment (used when each segment is rendered on its own, e.g. story shots)."""
+    clamp=True keeps every meme inside its own segment."""
     cfg = settings if isinstance(settings, MemeSettings) else MemeSettings.from_dict(settings)
     warnings: List[str] = []
     library.ensure_scanned()
@@ -668,8 +688,8 @@ def _rects_hit(a, b) -> bool:
 
 def assign_corners(matches: List[dict], frame_size: Tuple[int, int], avoid_rects: Sequence[Tuple[int, int, int, int]] = (),
                    scale: float = 0.34) -> None:
-    """Give every overlay meme a screen corner (or the requested one) that does not cover the 3D avatar, the character
-    portraits or another meme showing at the same time. Sets m["position"] / m["rect"]."""
+    """Give every overlay meme a screen corner (or the requested one) that does not cover a protected rectangle
+    (`avoid_rects`) or another meme showing at the same time. Sets m["position"] / m["rect"]."""
     try:
         from . import video_engine as ve
     except ImportError:  # pragma: no cover
@@ -696,7 +716,7 @@ def assign_corners(matches: List[dict], frame_size: Tuple[int, int], avoid_rects
                 continue
             chosen = (preset, rect)
             break
-        if chosen is None:  # every corner is busy: take the one furthest from the avatar rects
+        if chosen is None:  # every corner is busy: take the one furthest from the protected rects
             best = None
             for preset in ("Top-Right", "Top-Left", "Bottom-Right", "Bottom-Left"):
                 rect = ve.compute_pip_rect((W, H), size, preset, None, m.get("scale", scale))

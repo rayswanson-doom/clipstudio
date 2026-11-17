@@ -2,8 +2,8 @@
 backend/video_engine.py
 
 Turn a 16:9 video into a 9:16 vertical short that follows the speaker's face,
-re-attach the original audio with the bundled ffmpeg, and push the result to
-Google Drive.
+re-attach the original audio with the bundled ffmpeg, burn word-accurate subtitles
+in, mix trending background music under the voice, and push the result to Google Drive.
 
 Pipeline (create_vertical_short):
   1. OpenCV reads the requested time range frame by frame.
@@ -387,70 +387,13 @@ def create_vertical_short(
     }
 
 
-def build_merge_command(
-    ffmpeg: str,
-    audio_path: str,
-    output: str,
-    background_video: Optional[str] = None,
-    output_size: Tuple[int, int] = OUTPUT_SIZE,
-    fps: int = 30,
-    background_color: str = "0x101828",
-) -> List[str]:
-    """ffmpeg command that lays `audio_path` over a 9:16 background.
-
-    With `background_video` the clip is looped as needed, scaled and centre-cropped
-    to fill the frame, and its own audio is dropped. Without one, a solid colour
-    background is generated. The output ends when the voiceover ends.
-    """
-    w, h = output_size
-    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
-    if background_video:
-        cmd += ["-stream_loop", "-1", "-i", background_video]
-    else:
-        cmd += ["-f", "lavfi", "-i", f"color=c={background_color}:s={w}x{h}:r={fps}"]
-    cmd += ["-i", audio_path]
-    cmd += [
-        "-map", "0:v:0", "-map", "1:a:0",
-        "-vf", f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,fps={fps}",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k",
-        "-shortest", "-movflags", "+faststart",
-        output,
-    ]
-    return cmd
 
 
-def merge_audio_with_video(
-    audio_path: str,
-    output_path: str,
-    background_video: Optional[str] = None,
-    ffmpeg_path: Optional[str] = None,
-    output_size: Tuple[int, int] = OUTPUT_SIZE,
-    fps: int = 30,
-) -> str:
-    """Merge a voiceover with a background video (or a plain background) into a
-    vertical MP4 and return its path. Used by the text-to-video (AI Generator Lab) flow."""
-    if not Path(audio_path).is_file():
-        raise FileNotFoundError(f"Audio file not found: {audio_path}")
-    if background_video and not Path(background_video).is_file():
-        raise FileNotFoundError(f"Background video not found: {background_video}")
-
-    ffmpeg = find_ffmpeg(ffmpeg_path)
-    out = Path(output_path).expanduser()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    cmd = build_merge_command(ffmpeg, str(audio_path), str(out), background_video, output_size, fps)
-    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    proc = subprocess.run(cmd, capture_output=True, text=True, creationflags=flags)
-    if proc.returncode != 0 or not out.is_file():
-        if out.is_file():
-            out.unlink()
-        raise RuntimeError(f"ffmpeg merge failed ({proc.returncode}): {proc.stderr[-800:]}")
-    return str(out.resolve())
 
 
 
 # --------------------------------------------------------------------------- #
-# Podcast picture-in-picture: an avatar in a corner of the video
+# Corner-frame geometry (where a reaction meme sits in a corner of the video)
 # --------------------------------------------------------------------------- #
 PIP_PRESETS = ("Bottom-Right", "Bottom-Left", "Top-Right", "Top-Left", "Custom Coordinates")
 PIP_DEFAULT_SCALE = 0.36
@@ -469,24 +412,24 @@ def normalize_position_preset(preset: str) -> str:
     return table[key]
 
 
-def compute_pip_rect(base_size: Tuple[int, int], avatar_size: Tuple[int, int], position_preset: str = "Bottom-Right",
+def compute_pip_rect(base_size: Tuple[int, int], inset_size: Tuple[int, int], position_preset: str = "Bottom-Right",
                      custom_coordinates: Optional[Tuple[float, float]] = None, scale: float = PIP_DEFAULT_SCALE,
                      margin: Optional[int] = None) -> Tuple[int, int, int, int]:
-    """(x, y, w, h) in base-video pixels of the avatar frame.
+    """(x, y, w, h) in base-video pixels of the corner frame (`inset_size` = the inserted clip's own size).
 
-    scale   the avatar frame's width as a fraction of the base video's width (0.10 - 0.80)
+    scale   the corner frame's width as a fraction of the base video's width (0.10 - 0.80)
     Corner presets keep `margin` pixels (default 4 % of the width) from the edges. 'Custom Coordinates'
     puts the frame's top-left corner at (X, Y) pixels; the frame is pushed back inside the picture
     if it would stick out."""
     bw, bh = int(base_size[0]), int(base_size[1])
-    aw, ah = int(avatar_size[0]), int(avatar_size[1])
+    aw, ah = int(inset_size[0]), int(inset_size[1])
     if min(bw, bh, aw, ah) <= 0:
         raise ValueError("Video sizes must be positive.")
     preset = normalize_position_preset(position_preset)
     scale = float(min(max(scale, PIP_MIN_SCALE), PIP_MAX_SCALE))
     w = max(2, int(round(bw * scale / 2)) * 2)
     h = max(2, int(round(w * ah / aw / 2)) * 2)
-    if h > bh:  # tall avatar on a short video: fit by height
+    if h > bh:  # tall inserted clip on a short video: fit by height
         h = max(2, int(bh * 0.9) // 2 * 2)
         w = max(2, int(round(h * aw / ah / 2)) * 2)
     m = max(12, int(bw * 0.04)) if margin is None else int(margin)
@@ -502,59 +445,8 @@ def compute_pip_rect(base_size: Tuple[int, int], avatar_size: Tuple[int, int], p
     return x, y, w, h
 
 
-def _rounded_rect_mask(w: int, h: int, radius: int, inset: int = 0, canvas: Optional[Tuple[int, int]] = None,
-                       origin: Tuple[int, int] = (0, 0), supersample: int = 3):
-    """Float mask (0..1) of a rounded rectangle, drawn supersampled for smooth corners."""
-    import cv2
-    import numpy as np
-
-    cw, ch = canvas or (w, h)
-    big = np.zeros((ch * supersample, cw * supersample), np.uint8)
-    x0, y0 = (origin[0] + inset) * supersample, (origin[1] + inset) * supersample
-    x1, y1 = (origin[0] + w - inset) * supersample - 1, (origin[1] + h - inset) * supersample - 1
-    r = max(0, int((radius - inset) * supersample))
-    r = min(r, (x1 - x0) // 2, (y1 - y0) // 2)
-    cv2.rectangle(big, (x0 + r, y0), (x1 - r, y1), 255, -1)
-    cv2.rectangle(big, (x0, y0 + r), (x1, y1 - r), 255, -1)
-    for cx, cy in ((x0 + r, y0 + r), (x1 - r, y0 + r), (x0 + r, y1 - r), (x1 - r, y1 - r)):
-        cv2.circle(big, (cx, cy), r, 255, -1)
-    return cv2.resize(big, (cw, ch), interpolation=cv2.INTER_AREA).astype("float32") / 255.0
 
 
-def build_pip_frame_layers(base_size: Tuple[int, int], rect: Tuple[int, int, int, int],
-                           border_color: Tuple[int, int, int] = (255, 255, 255), border_px: Optional[int] = None,
-                           radius: Optional[int] = None, shadow: bool = True):
-    """(decoration RGBA uint8 (bh,bw,4) in BGRA, avatar mask uint8 (h,w)) for the podcast frame.
-
-    The decoration (drop shadow + border ring) is laid UNDER the avatar; the avatar's mask is inset
-    by the border width so the ring stays visible and the avatar's own pixels are never tinted."""
-    import cv2
-    import numpy as np
-
-    bw, bh = base_size
-    x, y, w, h = rect
-    border = max(2, int(round(w * 0.014))) if border_px is None else int(border_px)
-    rad = max(4, int(round(w * 0.075))) if radius is None else int(radius)
-    deco = np.zeros((bh, bw, 4), np.float32)
-    outer = _rounded_rect_mask(w, h, rad, 0, (bw, bh), (x, y))
-    if shadow:
-        blur = max(3, int(w * 0.05)) | 1
-        offset = max(2, int(w * 0.025))
-        sh = np.zeros((bh, bw), np.float32)
-        sx0, sy0 = x + 0, y + offset
-        sh_rect = _rounded_rect_mask(w, h, rad, 0, (bw, bh), (min(sx0, bw - 1), min(sy0, bh - 1)))
-        sh = cv2.GaussianBlur(sh_rect, (0, 0), blur / 2.0) * 0.60
-        deco[..., 3] = sh  # black shadow
-    ring_alpha = np.clip(outer - _rounded_rect_mask(w, h, rad, border, (bw, bh), (x, y)), 0, 1)
-    col = np.array(border_color[::-1], np.float32) / 255.0  # BGR
-    a_old = deco[..., 3:4]
-    a_new = ring_alpha[..., None]
-    out_a = a_new + a_old * (1 - a_new)
-    rgb = (col * a_new + deco[..., :3] * a_old * (1 - a_new)) / np.maximum(out_a, 1e-6)
-    deco[..., :3] = rgb
-    deco[..., 3:4] = out_a
-    mask = _rounded_rect_mask(w, h, rad, border)
-    return (deco * 255.0 + 0.5).astype(np.uint8), (mask * 255.0 + 0.5).astype(np.uint8)
 
 
 def _probe_media(ffmpeg: str, path: str) -> dict:
@@ -574,58 +466,113 @@ def _probe_media(ffmpeg: str, path: str) -> dict:
     return info
 
 
-def build_pip_command(ffmpeg: str, base: str, avatar: str, deco_png: str, mask_png: str, out: str,
-                      rect: Tuple[int, int, int, int], duration: float, audio_source: str, has_avatar_audio: bool,
-                      has_base_audio: bool) -> List[str]:
-    x, y, w, h = rect
-    chain = (
-        f"[1:v]scale={w}:{h},setsar=1,format=yuva420p[av0];[3:v]format=gray[m];[av0][m]alphamerge[av];"
-        f"[0:v][2:v]overlay=0:0:format=auto[b];[b][av]overlay={x}:{y}:format=auto:eof_action=repeat,format=yuv420p[v]"
-    )
-    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", base, "-i", avatar,
-           "-loop", "1", "-framerate", "30", "-i", deco_png, "-loop", "1", "-framerate", "30", "-i", mask_png]
-    amap: List[str]
-    if audio_source == "mix" and has_base_audio and has_avatar_audio:
-        chain += ";[0:a]volume=0.55[ba];[1:a]volume=1.0[aa];[ba][aa]amix=inputs=2:duration=first:normalize=0[a]"
-        amap = ["-map", "[a]"]
-    elif audio_source == "avatar" and has_avatar_audio:
-        amap = ["-map", "1:a:0"]
-    elif has_base_audio:
-        amap = ["-map", "0:a:0"]
-    elif has_avatar_audio:
-        amap = ["-map", "1:a:0"]
-    else:
-        amap = []
-    cmd += ["-filter_complex", chain, "-map", "[v]", *amap,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
-    if amap:
-        cmd += ["-c:a", "aac", "-b:a", "192k"]
-    cmd += ["-t", f"{duration:.3f}", "-movflags", "+faststart", out]
-    return cmd
 
 
-def join_clips(clips, output_path: str, ffmpeg_path: Optional[str] = None, list_dir: Optional[str] = None) -> str:
-    """Join clips that share codec / size / fps (the story renderer's shots) into one file, without re-encoding."""
-    import tempfile
 
+
+# --------------------------------------------------------------------------- #
+# burned-in subtitles
+# --------------------------------------------------------------------------- #
+def build_burn_command(ffmpeg: str, src: str, ass_name: str, out: str, fonts_dir: Optional[str] = None,
+                       crf: int = 20, preset: str = "veryfast") -> List[str]:
+    """ffmpeg command that hard-codes an .ass script into the picture (libass `ass=` filter) and copies the audio.
+    `ass_name` is relative to the directory ffmpeg runs in (burn_subtitles uses a temp dir), which avoids the Windows
+    drive-letter / backslash escaping problems of filter paths."""
+    vf = f"ass={ass_name}" + (f":fontsdir={fonts_dir}" if fonts_dir else "")
+    return [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(src), "-vf", vf, "-map", "0:v:0", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-pix_fmt", "yuv420p", "-c:a", "copy",
+            "-movflags", "+faststart", str(out)]
+
+
+def _run_ffmpeg(cmd: List[str], cwd: Optional[str] = None, timeout: float = 1800) -> str:
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, timeout=timeout, creationflags=flags)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip()[-600:] or f"ffmpeg exited with code {proc.returncode}")
+    return proc.stderr
+
+
+def burn_subtitles(input_path: str, ass_path: str, output_path: str, ffmpeg_path: Optional[str] = None,
+                   fonts_dir: Optional[str] = None) -> dict:
+    """Burn the .ass subtitles into the (already cropped 9:16) clip. The video is re-encoded once; audio is copied.
+    Returns {"output_path"}. Raises RuntimeError with ffmpeg's message if libass / the font is unavailable."""
     ff = find_ffmpeg(ffmpeg_path)
-    clips = [str(c) for c in clips]
-    if not clips:
-        raise ValueError("There are no clips to join.")
-    for c in clips:
-        if not os.path.isfile(c):
-            raise FileNotFoundError(f"Clip not found: {c}")
+    if not Path(input_path).is_file():
+        raise FileNotFoundError(f"Video not found: {input_path}")
+    if not Path(ass_path).is_file():
+        raise FileNotFoundError(f"Subtitle file not found: {ass_path}")
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="join_", dir=list_dir) as tmp:
-        listing = Path(tmp) / "list.txt"
-        listing.write_text("".join(f"file '{Path(c).resolve().as_posix()}'\n" for c in clips), encoding="utf-8")
-        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        proc = subprocess.run([ff, "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(listing),
-                               "-c", "copy", "-movflags", "+faststart", str(out)], capture_output=True, text=True, creationflags=flags)
-    if proc.returncode != 0 or not out.is_file():
-        raise RuntimeError(f"ffmpeg could not join the shots: {proc.stderr[-400:]}")
-    return str(out)
+    with tempfile.TemporaryDirectory(prefix="burn_") as tmp:
+        shutil.copyfile(ass_path, Path(tmp) / "subs.ass")
+        tmp_out = Path(tmp) / "out.mp4"
+        try:
+            _run_ffmpeg(build_burn_command(ff, str(Path(input_path).resolve()), "subs.ass", str(tmp_out), fonts_dir), cwd=tmp)
+        except RuntimeError as exc:
+            raise RuntimeError(f"ffmpeg could not burn the subtitles in: {exc}") from None
+        shutil.move(str(tmp_out), str(out))
+    return {"output_path": str(out.resolve())}
+
+
+# --------------------------------------------------------------------------- #
+# background music under the speaker (ducking)
+# --------------------------------------------------------------------------- #
+MUSIC_VOLUME_RANGE = (0.0, 1.0)
+DEFAULT_MUSIC_VOLUME = 0.15
+
+
+def build_music_filter(has_voice: bool, music_volume: float = DEFAULT_MUSIC_VOLUME, duck: bool = True, duration: float = 0.0,
+                       fade: float = 1.0) -> str:
+    """The -filter_complex string that puts music (input 1) under the clip's own audio (input 0).
+
+    music: looped endlessly (aloop), set to `music_volume`, faded in/out at the clip's ends.
+    duck=True: sidechaincompress lowers the music while the speaker talks (the voice is the sidechain), so the music
+               rises in the pauses and never fights the dialogue; duck=False: a plain constant low volume.
+    Both mix with amix and stop with the voice (duration=first). No voice in the clip: the music alone, cut to `duration`."""
+    lo, hi = MUSIC_VOLUME_RANGE
+    vol = min(max(float(music_volume), lo), hi)
+    fades = ""
+    if duration and duration > 2 * fade:
+        fades = f",afade=t=in:st=0:d={fade:.2f},afade=t=out:st={max(0.0, duration - fade):.2f}:d={fade:.2f}"
+    bgm = f"[1:a]aloop=loop=-1:size=2e+09,aresample=44100,aformat=channel_layouts=stereo,volume={vol:.3f}{fades}[bgm]"
+    if not has_voice:
+        trim = f",atrim=0:{duration:.3f}" if duration else ""
+        return bgm.replace("[bgm]", trim + "[aout]")
+    voice = "[0:a]aresample=44100,aformat=channel_layouts=stereo"
+    if duck:
+        return (f"{voice},asplit=2[voice][sc];{bgm};"
+                "[bgm][sc]sidechaincompress=threshold=0.03:ratio=10:attack=25:release=450:makeup=1[ducked];"
+                "[voice][ducked]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]")
+    return (f"{voice}[voice];{bgm};"
+            "[voice][bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]")
+
+
+def mix_background_music(video_path: str, music_path: str, output_path: str, music_volume: float = DEFAULT_MUSIC_VOLUME,
+                         duck: bool = True, ffmpeg_path: Optional[str] = None) -> dict:
+    """Mix `music_path` under the video's speech: the picture is copied untouched, only the audio is re-encoded (AAC).
+    Returns {"output_path","ducked","music_volume"}."""
+    ff = find_ffmpeg(ffmpeg_path)
+    for label, p in (("Video", video_path), ("Music", music_path)):
+        if not Path(p).is_file():
+            raise FileNotFoundError(f"{label} file not found: {p}")
+    info = _probe_media(ff, video_path)
+    if not info["has_video"]:
+        raise RuntimeError("The video could not be read.")
+    duration = float(info["duration"] or 0.0)
+    flt = build_music_filter(info["has_audio"], music_volume, duck, duration)
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp_out = out.with_name(out.stem + ".mixing" + out.suffix)
+    cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-i", str(video_path), "-i", str(music_path),
+           "-filter_complex", flt, "-map", "0:v:0", "-map", "[aout]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+           "-shortest", "-movflags", "+faststart", str(tmp_out)]
+    try:
+        _run_ffmpeg(cmd)
+    except RuntimeError as exc:
+        tmp_out.unlink(missing_ok=True)
+        raise RuntimeError(f"ffmpeg could not mix the background music: {exc}") from None
+    tmp_out.replace(out)
+    return {"output_path": str(out.resolve()), "ducked": bool(duck and info["has_audio"]), "music_volume": float(music_volume)}
 
 
 def splice_memes(input_path: str, output_path: str, matches, ffmpeg_path: Optional[str] = None,
@@ -724,99 +671,8 @@ def splice_memes(input_path: str, output_path: str, matches, ffmpeg_path: Option
     return {"output_path": str(Path(output_path).resolve()), "memes_applied": len(items), "size": (W, H), "duration": total}
 
 
-def place_podcast_avatar(
-    base_video: str,
-    avatar_video: str,
-    position_preset: str = "Bottom-Right",
-    custom_coordinates: Optional[Tuple[float, float]] = None,
-    scale: float = PIP_DEFAULT_SCALE,
-    output_path: Optional[str] = None,
-    audio_source: str = "base",
-    border_color: Tuple[int, int, int] = (255, 255, 255),
-    shadow: bool = True,
-    ffmpeg_path: Optional[str] = None,
-) -> dict:
-    """Picture-in-picture "podcast" layout: the avatar video in a rounded, bordered, shadowed frame
-    in a corner (or at exact pixel coordinates) of the base video.
-
-    position_preset    "Bottom-Right" | "Bottom-Left" | "Top-Right" | "Top-Left" | "Custom Coordinates"
-    custom_coordinates (X, Y) pixels of the frame's top-left corner, used with "Custom Coordinates"
-    scale              frame width as a fraction of the base video's width (0.10 - 0.80)
-    audio_source       "base" (default) | "avatar" | "mix" - which soundtrack the result keeps
-    The output is as long as the base video (a shorter avatar holds its last frame).
-    Returns {"output_path","rect":(x,y,w,h),"preset","scale","base_size","duration"}."""
-    for label, path in (("Base video", base_video), ("Avatar video", avatar_video)):
-        if not Path(path).is_file():
-            raise FileNotFoundError(f"{label} not found: {path}")
-    if audio_source not in ("base", "avatar", "mix"):
-        raise ValueError("audio_source must be 'base', 'avatar' or 'mix'.")
-    preset = normalize_position_preset(position_preset)
-    ffmpeg = find_ffmpeg(ffmpeg_path)
-    b, a = _probe_media(ffmpeg, base_video), _probe_media(ffmpeg, avatar_video)
-    if not b["has_video"] or b["width"] <= 0:
-        raise RuntimeError("The base video could not be read.")
-    if not a["has_video"] or a["width"] <= 0:
-        raise RuntimeError("The avatar video could not be read.")
-    rect = compute_pip_rect((b["width"], b["height"]), (a["width"], a["height"]), preset, custom_coordinates, scale)
-    out = Path(output_path) if output_path else Path(base_video).with_name(Path(base_video).stem + "_podcast.mp4")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    duration = b["duration"] or a["duration"]
-    import cv2
-
-    with tempfile.TemporaryDirectory(prefix="pip_") as tmp:
-        deco, mask = build_pip_frame_layers((b["width"], b["height"]), rect, border_color, shadow=shadow)
-        deco_png, mask_png = os.path.join(tmp, "deco.png"), os.path.join(tmp, "mask.png")
-        cv2.imwrite(deco_png, deco)
-        cv2.imwrite(mask_png, mask)
-        cmd = build_pip_command(ffmpeg, str(base_video), str(avatar_video), deco_png, mask_png, str(out), rect,
-                                duration, audio_source, a["has_audio"], b["has_audio"])
-        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        proc = subprocess.run(cmd, capture_output=True, text=True, creationflags=flags)
-    if proc.returncode != 0 or not out.is_file():
-        if out.is_file():
-            out.unlink()
-        raise RuntimeError(f"ffmpeg could not place the avatar ({proc.returncode}): {proc.stderr[-800:]}")
-    return {"output_path": str(out.resolve()), "rect": rect, "preset": preset, "scale": float(scale),
-            "base_size": (b["width"], b["height"]), "duration": round(duration, 2)}
 
 
-def preview_layout(base_size: Tuple[int, int] = OUTPUT_SIZE, avatar_size: Tuple[int, int] = (480, 640),
-                   position_preset: str = "Bottom-Right", custom_coordinates: Optional[Tuple[float, float]] = None,
-                   scale: float = PIP_DEFAULT_SCALE, base_frame=None, avatar_frame=None, thumb_height: int = 480):
-    """A small BGR picture of where the avatar will sit - drawn with the SAME geometry, frame, border
-    and shadow as the real render. `base_frame` / `avatar_frame` (BGR arrays) make it a true preview;
-    without them a placeholder backdrop and a silhouette are drawn."""
-    import cv2
-    import numpy as np
-
-    bw, bh = int(base_size[0]), int(base_size[1])
-    rect = compute_pip_rect((bw, bh), avatar_size, position_preset, custom_coordinates, scale)
-    k = thumb_height / bh
-    tw, th = max(2, int(round(bw * k))), thumb_height
-    small_rect = tuple(int(round(v * k)) for v in rect)
-    x, y, w, h = small_rect
-    if base_frame is not None:
-        canvas = cv2.resize(base_frame, (tw, th), interpolation=cv2.INTER_AREA)
-    else:
-        t = np.linspace(0, 1, th, dtype=np.float32)[:, None, None]
-        canvas = (np.array((70, 52, 40), np.float32) * (1 - t) + np.array((40, 30, 22), np.float32) * t)
-        canvas = np.broadcast_to(canvas, (th, tw, 3)).astype(np.uint8).copy()
-        for gx in range(1, 3):  # thirds grid so the position reads clearly
-            cv2.line(canvas, (tw * gx // 3, 0), (tw * gx // 3, th), (95, 80, 66), 1)
-            cv2.line(canvas, (0, th * gx // 3), (tw, th * gx // 3), (95, 80, 66), 1)
-    deco, mask = build_pip_frame_layers((tw, th), small_rect)
-    if avatar_frame is not None:
-        tile = cv2.resize(avatar_frame, (w, h), interpolation=cv2.INTER_AREA)
-    else:
-        tile = np.full((h, w, 3), (88, 64, 52), np.uint8)
-        cv2.circle(tile, (w // 2, int(h * 0.36)), int(w * 0.17), (190, 190, 215), -1)
-        cv2.ellipse(tile, (w // 2, int(h * 1.02)), (int(w * 0.34), int(h * 0.38)), 0, 180, 360, (190, 190, 215), -1)
-    a = deco[..., 3:4].astype(np.float32) / 255.0
-    canvas = (canvas.astype(np.float32) * (1 - a) + deco[..., :3].astype(np.float32) * a).astype(np.uint8)
-    m = (mask.astype(np.float32) / 255.0)[..., None]
-    roi = canvas[y:y + h, x:x + w]
-    canvas[y:y + h, x:x + w] = (roi * (1 - m) + tile * m).astype(np.uint8)
-    return canvas, rect
 
 
 if __name__ == "__main__":

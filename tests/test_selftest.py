@@ -31,9 +31,10 @@ class RealCheckTests(unittest.TestCase):
         self.assertIn("BlazeFace", selftest.check_face_model())
         self.assertIn("9:16", selftest.check_clip_pipeline())
 
-    @unittest.skipUnless(HAVE_VIDEO, "needs ffmpeg + opencv + mediapipe + model")
-    def test_avatar_check_runs_for_real(self):
-        self.assertIn("frames", selftest.check_avatar())
+    @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+    def test_subtitle_and_social_checks_run_for_real(self):
+        self.assertIn("burned in", selftest.check_subtitles())
+        self.assertIn("IG tags", selftest.check_social())
 
     def test_app_page_missing_file(self):
         with self.assertRaises(RuntimeError):
@@ -59,8 +60,8 @@ class RealCheckTests(unittest.TestCase):
 
 class RunnerTests(unittest.TestCase):
     def patched(self, **overrides):
-        names = ["check_imports", "check_ffmpeg", "check_scorer", "check_face_model",
-                 "check_whisper", "check_clip_pipeline", "check_avatar", "check_avatar_3d", "check_render_engine", "check_story", "check_memes", "check_episode_studio", "check_ocr", "check_cues", "check_tts_online"]
+        names = ["check_imports", "check_ffmpeg", "check_scorer", "check_face_model", "check_whisper", "check_clip_pipeline",
+                 "check_subtitles", "check_music", "check_social", "check_memes", "check_ocr"]
         stack = [mock.patch.object(selftest, n, return_value="fine") for n in names]
         stack.append(mock.patch.object(selftest, "check_app_page", return_value="fine"))
         return stack
@@ -76,18 +77,20 @@ class RunnerTests(unittest.TestCase):
     def test_all_ok(self):
         results = self.run_with()
         self.assertEqual({r[1] for r in results}, {"ok"})
-        self.assertEqual(len(results), 17)
+        self.assertEqual(len(results), 12)
 
     def test_hard_failure_is_reported(self):
         results = dict((r[0], r[1]) for r in self.run_with("check_face_model"))
         self.assertEqual(results["face model"], "fail")
 
-    def test_online_tts_failure_is_only_a_warning(self):
-        results = dict((r[0], r[1]) for r in self.run_with("check_tts_online"))
-        self.assertEqual(results["edge-tts (online)"], "warn")
+    def test_new_feature_checks_are_part_of_the_selftest(self):
+        names = [r[0] for r in self.run_with()]
+        for needle in ("subtitles", "music", "captions"):
+            self.assertTrue(any(needle in n for n in names), (needle, names))
+        self.assertFalse(any("avatar" in n.lower() or "story" in n.lower() or "episode" in n.lower() for n in names))
 
     def test_main_exit_codes(self):
-        for failing, code in ((None, 0), ("check_whisper", 1), ("check_tts_online", 0)):
+        for failing, code in ((None, 0), ("check_whisper", 1), ("check_music", 1)):
             patches = self.patched()
             for p in patches:
                 p.start()

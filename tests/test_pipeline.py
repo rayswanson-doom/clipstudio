@@ -1,5 +1,5 @@
 """Pipeline tests with real OpenCV + ffmpeg. Only the things that need the
-network or heavy models are replaced: transcription, edge-tts, Drive upload."""
+network or heavy models are replaced: transcription, yt-dlp, Drive upload."""
 import os
 import shutil
 import stat
@@ -25,21 +25,6 @@ def three_sentence_words():
         [("Stop this is crazy!", 0), ("Did you know this secret?", 0), ("It cost 5 million dollars.", 0)],
         wps=0.2, gap=0.05,
     )
-
-
-class FakeVoice:
-    seconds = 2
-    calls = []
-
-    @classmethod
-    async def generate(cls, text, output_path, voice="en-US-AriaNeural", **kw):
-        cls.calls.append({"text": text, "voice": voice})
-        subprocess.run(
-            [FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi", "-i",
-             f"sine=frequency=330:duration={cls.seconds}", "-f", "wav", output_path],
-            check=True,
-        )
-        return output_path
 
 
 @unittest.skipUnless(FFMPEG, "ffmpeg not installed")
@@ -112,109 +97,83 @@ class VugolaTests(unittest.TestCase):
             self.assertIn("drive down", clip["error"])
             self.assertTrue(os.path.isfile(clip["output_path"]))  # clip still saved
 
+    # ---- Viral Clip Studio features -------------------------------------------------------------------------
+    def test_subtitles_are_burned_in_and_files_kept(self):
+        res = self.run_pipeline("s1", upload=False, subtitles={"enabled": True, "size": "Large", "color": "Yellow"})
+        self.assertEqual(res["warnings"], [])
+        for clip in res["clips"]:
+            self.assertTrue(clip["subtitled"], clip)
+            self.assertTrue(os.path.isfile(clip["subtitle_files"]["srt"]))
+            ass = Path(clip["subtitle_files"]["ass"]).read_text(encoding="utf-8")
+            self.assertIn("[V4+ Styles]", ass)
+            self.assertIn("Dialogue:", ass)
+            self.assertEqual(probe(clip["output_path"])["streams"][0]["height"], 1920)
 
-@unittest.skipUnless(FFMPEG, "ffmpeg not installed")
-class ViewmaxTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.dir = tempfile.TemporaryDirectory()
-        cls.bg = os.path.join(cls.dir.name, "bg.mp4")
-        make_source(cls.bg, with_audio=False)  # 3 s background
+    def test_subtitles_off_by_default_and_failure_is_a_warning(self):
+        res = self.run_pipeline("s2", upload=False)
+        self.assertFalse(any(c["subtitled"] for c in res["clips"]))
+        with mock.patch.object(pipeline, "burn_subtitles", side_effect=RuntimeError("libass missing")):
+            res = self.run_pipeline("s3", upload=False, subtitles={"enabled": True})
+        self.assertTrue(any("subtitles could not be added" in w for w in res["warnings"]))
+        for clip in res["clips"]:
+            self.assertFalse(clip["subtitled"])
+            self.assertIsNone(clip["error"])
+            self.assertTrue(os.path.isfile(clip["output_path"]))
 
-    @classmethod
-    def tearDownClass(cls):
-        cls.dir.cleanup()
+    def test_music_from_own_file_is_mixed_under_the_voice(self):
+        bgm = os.path.join(self.dir.name, "bgm.mp3")
+        subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=500:duration=1", bgm], check=True)
+        res = self.run_pipeline("m1", upload=False, music={"enabled": True, "path": bgm, "volume": 0.2, "duck": True})
+        self.assertEqual(res["warnings"], [])
+        for clip in res["clips"]:
+            self.assertTrue(clip["music_mixed"])
+            kinds = [x["codec_type"] for x in probe(clip["output_path"])["streams"]]
+            self.assertEqual(sorted(kinds), ["audio", "video"])
 
-    def setUp(self):
-        ready = mock.patch.object(pipeline, "drive_status", return_value="ready")
-        ready.start()
-        self.addCleanup(ready.stop)
-        FakeVoice.calls = []
-        FakeVoice.seconds = 2
+    def test_music_trending_track_uses_the_finder_and_failure_is_a_warning(self):
+        bgm = os.path.join(self.dir.name, "bgm2.mp3")
+        subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=400:duration=1", bgm], check=True)
+        track = {"id": "abc", "title": "Beat", "channel": "Ch", "url": "https://youtu.be/abc"}
+        found = {"query": "lofi", "tracks": [track], "selected": track, "path": bgm, "warnings": [], "licence_note": "check licence"}
+        with mock.patch.object(pipeline.music_finder, "fetch_trending_music", return_value=found) as fm:
+            res = self.run_pipeline("m2", upload=False, music={"enabled": True, "query": "lofi"})
+        self.assertEqual(fm.call_args[0][0], "lofi")
+        self.assertTrue(all(c["music_mixed"] for c in res["clips"]))
+        self.assertEqual(res["music"]["path"], bgm)
+        down = {"query": "", "tracks": [], "selected": None, "path": None, "licence_note": "",
+                "warnings": ["Could not reach YouTube: offline"]}
+        with mock.patch.object(pipeline.music_finder, "fetch_trending_music", return_value=down):
+            res = self.run_pipeline("m3", upload=False, music={"enabled": True})
+        self.assertTrue(any("offline" in w for w in res["warnings"]))
+        self.assertFalse(any(c["music_mixed"] for c in res["clips"]))
+        self.assertTrue(all(os.path.isfile(c["output_path"]) for c in res["clips"]))
 
-    def go(self, name, prompt="Make a motivational 20 second TikTok script about running", **kw):
-        out = os.path.join(self.dir.name, name)
-        kw.setdefault("folder_id", "FOLD")
-        with mock.patch.object(pipeline, "generate_voiceover", FakeVoice.generate), mock.patch.object(
-            pipeline, "upload_to_google_drive", return_value="https://drive/v"
-        ) as up:
-            res = pipeline.run_viewmax_pipeline(prompt, output_dir=out, ffmpeg_path=FFMPEG, **kw)
-        return res, up
+    def test_social_packages_are_generated_offline_for_every_clip(self):
+        res = self.run_pipeline("c1", upload=False)
+        for clip in res["clips"]:
+            pk = clip["social"]
+            self.assertLess(len(pk["youtube"]["title"]), 60)
+            self.assertTrue(10 <= len(pk["youtube"]["tags"]) <= 16)
+            self.assertTrue(15 <= len(pk["instagram"]["hashtags"]) <= 20)
+            self.assertTrue(5 <= len(pk["facebook"]["hashtags"]) <= 8)
+        res = self.run_pipeline("c2", upload=False, social={"enabled": False})
+        self.assertTrue(all(c["social"] is None for c in res["clips"]))
 
-    def test_plain_background(self):
-        res, up = self.go("p1")
-        info = probe(res["video_path"])
-        v = next(s for s in info["streams"] if s["codec_type"] == "video")
-        self.assertEqual((v["width"], v["height"]), (1080, 1920))
-        self.assertTrue(any(s["codec_type"] == "audio" for s in info["streams"]))
-        self.assertAlmostEqual(float(info["format"]["duration"]), 2.0, delta=0.2)
-        up.assert_called_once_with(res["video_path"], "FOLD")
-        self.assertEqual(res["drive_link"], "https://drive/v")
-        self.assertIn("running", res["script"]["script"])
-        self.assertEqual(FakeVoice.calls[0]["text"], res["script"]["script"])
-
-    def test_background_video_loops_to_voiceover_length(self):
-        FakeVoice.seconds = 5  # longer than the 3 s background
-        res, _ = self.go("p2", background_video=self.bg)
-        info = probe(res["video_path"])
-        self.assertAlmostEqual(float(info["format"]["duration"]), 5.0, delta=0.3)
-        self.assertTrue(any(s["codec_type"] == "audio" for s in info["streams"]))
-
-    def test_voice_is_passed_through(self):
-        self.go("p3", voice="en-GB-RyanNeural")
-        self.assertEqual(FakeVoice.calls[0]["voice"], "en-GB-RyanNeural")
-
-    def test_no_folder_skips_upload(self):
-        res, up = self.go("p4", folder_id="")
+    def test_upload_false_never_touches_drive(self):
+        with mock.patch.object(pipeline, "upload_to_google_drive") as up:
+            res = self.run_pipeline("u1", upload=False)
         up.assert_not_called()
-        self.assertIsNone(res["drive_link"])
-        self.assertIn(pipeline.NO_FOLDER_WARNING, res["warnings"])
+        self.assertTrue(all(c["drive_link"] is None for c in res["clips"]))
 
-    def test_empty_prompt(self):
-        with self.assertRaises(ValueError):
-            pipeline.run_viewmax_pipeline("   ", "F")
-
-
-class AsyncHelperTests(unittest.IsolatedAsyncioTestCase):
-    async def test_run_async_inside_running_loop(self):
-        async def coro():
-            return 42
-        self.assertEqual(pipeline._run_async(coro()), 42)
-
-
-@unittest.skipUnless(FFMPEG, "ffmpeg not installed")
-class MergeTests(unittest.TestCase):
-    def test_command_variants(self):
-        with_bg = ve.build_merge_command("ff", "a.wav", "o.mp4", background_video="bg.mp4")
-        self.assertIn("-stream_loop", with_bg)
-        self.assertIn("bg.mp4", with_bg)
-        plain = ve.build_merge_command("ff", "a.wav", "o.mp4")
-        self.assertIn("lavfi", plain)
-        self.assertNotIn("-stream_loop", plain)
-        for cmd in (with_bg, plain):
-            self.assertIn("-shortest", cmd)
-            self.assertEqual(cmd[-1], "o.mp4")
-
-    def test_missing_inputs(self):
-        with self.assertRaises(FileNotFoundError):
-            ve.merge_audio_with_video("/no/a.wav", "/tmp/o.mp4", ffmpeg_path=FFMPEG)
-        with tempfile.TemporaryDirectory() as d:
-            a = os.path.join(d, "a.wav")
-            Path(a).write_bytes(b"x")
-            with self.assertRaises(FileNotFoundError):
-                ve.merge_audio_with_video(a, os.path.join(d, "o.mp4"), "/no/bg.mp4", ffmpeg_path=FFMPEG)
-
-    def test_ffmpeg_failure_wrapped(self):
-        with tempfile.TemporaryDirectory() as d:
-            a = os.path.join(d, "a.wav")
-            Path(a).write_bytes(b"x")
-            fake = os.path.join(d, "bad.sh")
-            Path(fake).write_text("#!/bin/sh\necho kaput >&2\nexit 1\n")
-            os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
-            with self.assertRaises(RuntimeError) as cm:
-                ve.merge_audio_with_video(a, os.path.join(d, "o.mp4"), ffmpeg_path=fake)
-            self.assertIn("kaput", str(cm.exception))
-            self.assertFalse(os.path.exists(os.path.join(d, "o.mp4")))
+    def test_all_features_together(self):
+        bgm = os.path.join(self.dir.name, "bgm3.mp3")
+        subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=450:duration=1", bgm], check=True)
+        with mock.patch.object(pipeline, "upload_to_google_drive", return_value="https://drive/z") as up:
+            res = self.run_pipeline("all", subtitles={"enabled": True}, music={"enabled": True, "path": bgm})
+        for clip in res["clips"]:
+            self.assertTrue(clip["subtitled"] and clip["music_mixed"] and clip["social"])
+            self.assertEqual(clip["drive_link"], "https://drive/z")
+        self.assertEqual(up.call_count, len(res["clips"]))
 
 
 if __name__ == "__main__":

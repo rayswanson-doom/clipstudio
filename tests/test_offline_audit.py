@@ -26,12 +26,11 @@ class ImportTests(unittest.TestCase):
         code = (
             "import sys\n"
             "for m in ('yt_dlp','googleapiclient','google','google_auth_oauthlib','faster_whisper',"
-            "'edge_tts','streamlit','rapidocr_onnxruntime','onnxruntime'):\n"
+            "'streamlit','rapidocr_onnxruntime','onnxruntime'):\n"
             "    sys.modules[m] = None\n"
             f"sys.path.insert(0, {str(ROOT / 'backend')!r})\n"
-            "import scorer, uploader, transcriber, tts_engine, video_engine, avatar_sync, ocr_engine, visual_cues, pipeline\n"
-            "import avatar_3d_engine, glb_model, soft_raster, lipsync_en, avatar_gestures, demo_avatars, render_engine\n"
-            "import vimax_orchestrator, novel_adapter, script_parser, dependency_graph, meme_matcher, asset_manager\n"
+            "import scorer, uploader, transcriber, video_engine, ocr_engine, meme_matcher, pipeline\n"
+            "import subtitle_engine, music_finder, social_metadata\n"
             "print('imports-ok')\n"
         )
         out = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=120)
@@ -44,7 +43,6 @@ class ImportTests(unittest.TestCase):
         ):
             words = make_words([("Did you know this secret?", 0), ("It is insane!", 0)])
             self.assertTrue(scorer.find_viral_clips(words, min_len=1, max_len=30))
-            self.assertIn("script", scorer.generate_script("script about tea"))
 
 
 class DriveFallbackTests(unittest.TestCase):

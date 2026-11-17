@@ -93,13 +93,6 @@ class SegmentTests(unittest.TestCase):
         self.assertEqual(len(segs), 2)
         self.assertAlmostEqual(segs[0]["start"], 0.0)
 
-    def test_shots(self):
-        s = M.segments_from_shots([{"idx": 1, "start": 0, "end": 2, "line": "Hi!"}, {"idx": 2, "start": 2, "end": 3}])
-        self.assertEqual(len(s), 1)
-        self.assertEqual(s[0]["shot"], 1)
-
-
-@unittest.skipUnless(FFMPEG, "ffmpeg needed")
 class LibraryAndPlanTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -180,15 +173,15 @@ class LibraryAndPlanTests(unittest.TestCase):
         lib.record_usage(plan["matches"])
         self.assertTrue(lib.usage())
 
-    def test_overlay_avoids_avatar_rect(self):
+    def test_overlay_avoids_protected_rect(self):
         lib = self.lib()
-        avatar = (150, 330, 110, 140)  # bottom-right
+        protected = (150, 330, 110, 140)  # bottom-right
         plan = M.plan_memes([{"start": 0, "end": 3, "text": "I am so sad, crying"}], lib,
                             M.MemeSettings(enabled=True, mode="overlay", min_score=0.2), 5.0,
-                            avoid_rects=[avatar], frame_size=(270, 480))
+                            avoid_rects=[protected], frame_size=(270, 480))
         self.assertEqual(len(plan["matches"]), 1)
         x, y, w, h = plan["matches"][0]["rect"]
-        ax, ay, aw, ah = avatar
+        ax, ay, aw, ah = protected
         self.assertFalse(x < ax + aw and ax < x + w and y < ay + ah and ay < y + h)
 
     def test_custom_coordinates_and_clamp(self):
@@ -325,12 +318,11 @@ class CollectFinalVideosTests(unittest.TestCase):
         import uploader as U
         d = Path(tempfile.mkdtemp())
         try:
-            a, b, c = d / "a.mp4", d / "b.mp4", d / "c.mp4"
-            for f in (a, b, c):
+            a, b = d / "a.mp4", d / "b.mp4"
+            for f in (a, b):
                 f.write_bytes(b"x")
-            res = {"video_path": str(a), "clips": [{"output_path": str(b)}, {"output_path": None}, {"output_path": str(a)}],
-                   "episodes_out": [{"video_path": str(c)}, {"video_path": str(d / "gone.mp4")}]}
-            self.assertEqual(U.collect_final_videos(res), [str(a), str(b), str(c)])
+            res = {"video_path": str(a), "clips": [{"output_path": str(b)}, {"output_path": None}, {"output_path": str(a)}]}
+            self.assertEqual(U.collect_final_videos(res), [str(a), str(b)])
             self.assertEqual(U.collect_final_videos({}), [])
         finally:
             shutil.rmtree(d, ignore_errors=True)

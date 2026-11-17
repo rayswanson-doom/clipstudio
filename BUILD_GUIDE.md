@@ -96,7 +96,7 @@ may fail on Windows - they do not affect the build.)
 ---------------------------------------------------------------------------
 ## Things to know
 - **Offline vs online:** transcription, highlight scoring, face-tracked cropping and merging work with no
-  internet. YouTube downloads, edge-tts voices and Google Drive upload need internet.
+  internet. YouTube downloads, the trending-music search and Google Drive upload need internet.
 - **Without Google files** the app still launches and works; clips just stay local and the app tells you
   Drive backup is off.
 - **If face tracking can't run**, the app falls back to a centre crop and says so.
@@ -107,106 +107,24 @@ may fail on Windows - they do not affect the build.)
   Windows ffmpeg instead.
 
 
-## AI Avatar lip-sync (AI Generator Lab)
+## Viral Clip Studio (what the app does)
 
-In the **AI Generator Lab** tab, tick **Enable AI Avatar Lip-Sync Commentary** and upload a `.jpg`/`.png`
-picture of your avatar. The generated video then shows that picture talking in time with the voiceover.
+Paste a YouTube link (or upload a video) and the app cuts the best moments into 9:16 clips, all on the CPU.
 
-- It runs on the CPU only (no GPU, no API key). A 30-second video takes roughly 30-60 seconds on a laptop.
-- A clear, front-facing face (photo or flat illustration) gives real mouth movement: the jaw opens and closes
-  with the voice and shuts between words (word timing comes from the bundled Whisper model).
-- If no face is found, the whole picture does a gentle talking pulse instead, and you are told so.
-- If you also add a background video, the avatar appears as a rounded card over it.
-- This is 2-D image warping, not a neural talking-head model, so the motion is stylised and subtle.
+- **Burn-in Subtitles** - `backend/subtitle_engine.py` transcribes with faster-whisper (`cpu`, `int8`, word timestamps),
+  groups the words into 3-5 word cues and writes a `.srt` and a styled `.ass` (bold white text, black outline, bottom
+  centre, kept clear of the Shorts/Reels buttons). `video_engine.burn_subtitles` burns them in with the bundled ffmpeg.
+  Pick the font size and colour in the sidebar.
+- **Add Trending YouTube Background Music** - `backend/music_finder.py` uses `yt_dlp` search (no API key), ranks the
+  top results by views, recency and duration, and caches the chosen track in `storage/music_cache/`. Press
+  *Scan Trending Tracks* to pick from the top 5, or let the app use the top one. The music is looped, set to a low
+  volume and ducked under the voice (`video_engine.mix_background_music`).
+  Needs internet. Popular tracks are usually copyrighted: check the licence before you publish, or upload your own file.
+- **Captions and tags** - `backend/social_metadata.py` writes a YouTube Shorts title (under 60 characters), description
+  and 10-15 tags (+ #Shorts), an Instagram Reels caption with a call to action and 15-20 hashtags, and a Facebook Reels
+  caption with 5-8 hashtags. It works offline; a free Groq or Gemini key (`GROQ_API_KEY` / `GEMINI_API_KEY`) is optional.
+- **Meme reactions** (`backend/meme_matcher.py`), **on-screen text reading** (`backend/ocr_engine.py`) and
+  **Google Drive backup** (`backend/uploader.py`) are unchanged.
 
-## 3D avatars and the podcast layout (AI Generator Lab)
-
-Pick a **Model type** (Photorealistic Human, AI Model, Anime) and optionally upload a `.glb` (Ready Player Me,
-Mixamo, most humanoid exports) or `.vrm` (VRoid) file. With no upload the built-in demo avatar for that style is used.
-
-- **Lip sync** is phoneme level: the narration is turned into visemes (TalkingHead's English rules) and timed against the
-  voiceover's loudness. Models with `viseme_*`, VRM A/I/U/E/O or a `jawOpen` blend shape get the matching mouth shapes.
-- **Gestures**: head nods/tilts and arm poses (open palms, point, wave, hand on heart, thumbs up ...) are chosen from the
-  script, or from your own `[wave]` style notes (motion-engine's keyword director, run offline). Tick/untick "Body gestures".
-- **Position**: Bottom-Right / Bottom-Left / Top-Right / Top-Left or Custom Coordinates (X, Y pixels), scale 15-60 %.
-  The avatar sits in a rounded frame with a border and drop shadow; the layout preview shows exactly where.
-- It renders on the CPU with a built-in software renderer (no GPU, no PyTorch): roughly 0.25-0.5 s per frame at the
-  default size, so a 15 s clip takes a few minutes on a laptop. "Render quality: fast" is the quickest.
-- Not supported: Draco / meshopt compressed GLBs and models with external `.bin` files (a clear error is shown;
-  re-export without compression). Fingers are not posed; thumbs-up / OK are arm poses.
-- Finished videos are backed up to Google Drive automatically when a Folder ID is set.
-- `python build_exe.py --with-torch` additionally bundles PyTorch (+1-2 GB). Nothing in the app needs it today.
-
-## Multi-track render engine, richer scripts, OCR (Ultimate build)
-
-`backend/render_engine.py` composes the final video from tracks aligned to the voiceover (patterns from Remotion,
-Revideo, GSAP and Motion Canvas, re-implemented in Python so it runs on a CPU laptop):
-B-roll (your background video, or an animated backdrop when there is none) -> OCR text overlays -> the 3D avatar in a
-rounded, framed corner -> voiceover + optional music (ducked under the voice). Overlays enter/leave with GSAP-style
-easings. If composition fails the app falls back to the simple ffmpeg layout, then to a plain voiceover video.
-
-- **OCR**: text read from the video frames is narrated (deduplicated, in order of appearance) and, optionally, shown as
-  captions at the moment it appears. "Text reader" chooses Auto (PaddleOCR when installed, else RapidOCR), PaddleOCR or RapidOCR.
-- **Scripts** can be written like a screenplay: `SCENE 1: Hook`, `NARRATOR:` labels, `VISUAL:` / `(parenthesis)` / `> ` direction
-  lines, `[m:ss]` timecodes (a direction pinned to that second), `[pause 1s]` and inline `[directions]`. Directions apply to
-  the next spoken sentence.
-- **Not included**: LTX-Video (a GPU diffusion model) cannot run on a CPU laptop; the app reports its status and uses the
-  animated backdrop instead. Remotion, GSAP, Motion Canvas and Manim are JavaScript / LaTeX toolchains; their *ideas* (frame-based
-  composition, easings, timelines, procedural motion graphics) are re-implemented, their code is not bundled.
-- **Big optional engines**: `python build_exe.py --with-paddleocr`, `--with-torch` or `--ultimate` (both) bundle PaddleOCR and/or PyTorch
-  (+0.5 and +1-2 GB; GitHub releases accept at most 2 GB per file). In GitHub Actions use the two checkboxes when you press
-  "Run workflow". Nothing in the app needs them today: the default build already reads text with RapidOCR (the PP-OCR models).
-
-## Story Studio (ViMax-style agents, CPU only)
-
-In the **AI Generator Lab**, the creation modes **Idea2Video**, **Novel2Video** and **Script2Video** turn an idea, a novel or a screenplay into episodes (storyboard + preview video). The fourth mode, **Clip Repurposer**, is the long-to-shorts clipper. Nothing needs a GPU.
-
-| Module | Role |
-|---|---|
-| `backend/vimax_orchestrator.py` | Director, Screenwriter, Character Extractor, Storyboard Artist, Reference Selector and Consistency Checker, plus the Groq / Gemini structured-JSON clients and the CPU animatic renderer |
-| `backend/script_parser.py` | Script2Video: INT./EXT. scenes, character cues, parentheticals and dialogue -> shots with exact timing and camera angle / movement / prompts |
-| `backend/novel_adapter.py` | Novel2Video: chapters -> beats (embedding-based) -> character profiles -> episodic screenplays |
-| `backend/dependency_graph.py` | Links each character's anchor portrait to every shot, passes each shot's last frame to the next, and measures appearance drift |
-
-- **No key needed.** "Offline" uses built-in rules. Choose Groq or Gemini and paste a key to let the model rewrite the script and
-  camera prompts as structured JSON; the key is used for that run only, is never saved or returned, and any failure falls back to
-  the rules with a warning.
-- **Embeddings.** Novels use a built-in hashed bag-of-words embedder. If `sentence-transformers` is installed the app uses
-  `all-MiniLM-L6-v2` instead (it is not bundled; it downloads about 90 MB on first use).
-- **What the preview is.** A stylised animatic: a painted portrait per character (the same one in every shot), a backdrop seeded from the
-  location, subtitles and keyframe continuity between shots. It is not photorealistic AI video; that needs a GPU.
-- The project (script, storyboard, characters, graph, subtitles) is saved next to the video in `outputs/story_*`.
-
-## Auto-Meme Reactions (CPU only, no API key)
-
-Switch on **Enable Contextual Meme Reactions** (Clip Repurposer, the classic narrated generator and the story modes). `backend/meme_matcher.py` reads the mood of each line (a local emotion lexicon; optionally Groq / Gemini structured-JSON tags in story mode), picks a clip from `storage/memes/` (next to the exe), and the video is composed with it as a corner tile or a full-screen cutaway. Overlays avoid the 3D avatar's corner. The finished file (with the reaction and avatar) is what gets uploaded to Google Drive.
-
-- Put clips in `storage/memes/<mood>/` (laugh, shock, sad, angry, cringe, confused, win, love, fear, cool), or name/tag them, or upload them in the app. "Create the starter pack" makes 10 simple original clips.
-- Matching uses the folder / file names and `memes.json` tags plus text sentiment. It does **not** watch the video, and the sentiment lexicon is weak on sarcasm.
-- Inspired by DaBlincx/meme-video-gen (usage archive so clips are not repeated) and ssrajadh/sentrysearch (cached index, confidence threshold). No code was copied.
-
-## Episode Studio (Idea2Video / Novel2Video / Script2Video)
-
-The story modes are a 3-step wizard:
-
-1. **Story & script** - idea, screenplay or novel -> narrative beats, characters, locations, storyboard. Nothing is rendered yet: the run stops at the *Pre-Production Asset Gate* (`backend/asset_manager.py`, `vimax_orchestrator.open_asset_gate / close_asset_gate`).
-2. **Asset studio** - one prompt card per character (hair, eyes, build, attire, emotional role) and per location (setting, lighting, atmosphere). Upload a full-length character picture and a background picture for each card, or press **Generate Reference Visuals**: a free key-less online generator (pollinations.ai, needs internet) -> a local CPU diffusers model (only if you installed `diffusers` + `torch`) -> the built-in offline painter (simple flat art). Rendering stays locked until every card has a picture.
-3. **Render episode** - storyboard preview with the locked pictures, then the render. `dependency_graph` links every shot to its character and location reference (`bind_assets`, `enforce_locks`, `reference_manifest`) and the renderer draws only from those files, so a character looks the same in every cut. Each shot = scenery plate with a programmatic camera move (pan / tilt / push / pull / hand-held), cut-out characters (OpenCV GrabCut, or `rembg` if installed) that slide in/out and bob while they talk, kinetic captions timed to the voice, and the optional host corner avatar / meme reactions. Character sheets, location pictures, `assets.json` and the episode are backed up to the Google Drive folder.
-
-### Generative AI Video Mode vs 2D Cinematic Composition Mode
-
-Step 3 has a **Visual style** switch.
-
-- **2D Cinematic Composition Mode** (default, runs anywhere): locked scenery + cut-out characters + camera moves.
-- **Generative AI Video Mode** (`backend/generative_video.py`): each shot's locked first frame (scenery + character reference pictures) is animated by a video model. Tried in order, per shot, with fallback: local **LTX-Video** (diffusers `LTXImageToVideoPipeline`), local **Stable Video Diffusion** (`StableVideoDiffusionPipeline`), then **pollinations.ai** video (`gen.pollinations.ai/image/{prompt}?model=...`, needs an API key, most video models are paid, text-to-video so the reference pictures are NOT fed to it). A backend that is missing or fails (no GPU, no weights, no key, no internet) is marked down for the rest of the episode and that shot is rendered in 2D; the result lists the reason.
-- LTX-Video / SVD need the optional packages `diffusers` + `torch`, a CUDA GPU and the downloaded weights (several GB; nothing is downloaded automatically). The Windows build bundles CPU PyTorch only, so inside the packaged exe those two report "no CUDA GPU" unless you build with a GPU torch + diffusers (`python build_exe.py --with-torch`). Check readiness any time: the app lists each backend's status when the mode is selected.
-
-### Caption timing
-
-Kinetic captions use real word boundaries: the voiceover is transcribed with faster-whisper (`transcriber.word_timings`), the spoken words are aligned to the script words (`align_words`; words whisper missed are interpolated between their neighbours) and the highlight follows them. If faster-whisper or its model is unavailable, or the recognised words do not match the script, the captions fall back to length-based estimated timing and the result says so.
-
-### Google Drive checks
-
-`python backend/uploader.py --check [--folder-id ID]` runs a live read-only check (files -> network -> sign-in -> API -> folder). Offline refreshes raise a clear offline error (no browser opens), a revoked token tells you to sign in again, a 401 mid-upload refreshes the token and retries once, and a corrupted `token.json` is set aside as `token.json.bad`.
-
-Honest limits: the 2D mode is a composition, not AI video; the painter's pictures are simple flat art; generative clips are only as consistent as the video model; the online picture generator, the model adapters and Drive were verified with stand-ins in tests, not against the live services.
+Removed in this version: AI avatars, lip-sync, 3D avatars, the podcast layout, Story Studio / ViMax, Novel2Video,
+Episode Studio, generative video and text-to-speech.

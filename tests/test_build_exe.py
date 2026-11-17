@@ -272,7 +272,7 @@ class MainTests(unittest.TestCase):
             self.assertNotIn("WARNING: ffmpeg", out.getvalue())
             self.assertIn("Zip validation passed", out.getvalue())
             self.assertEqual(build_exe.validate_zip(z), [])
-            self.assertEqual(build_exe.ZIP_NAME, "CinePulseAI-Generative-Portable.zip")
+            self.assertEqual(build_exe.ZIP_NAME, "CinePulseAI-ViralClipper-Portable.zip")
 
     def test_errors_stop_before_pyinstaller(self):
         with tempfile.TemporaryDirectory() as d:
@@ -356,7 +356,7 @@ class ValidateZipTests(unittest.TestCase):
 
     def test_old_ui_in_the_zip_is_caught(self):
         problems = build_exe.validate_zip(make_zip_file(self.z, app_text="old UI Vugola AI Mode"))
-        self.assertTrue(any("Enable AI Avatar Lip-Sync Commentary" in p for p in problems))
+        self.assertTrue(any("Burn-in Subtitles" in p for p in problems))
 
     def test_missing_and_corrupt_zip(self):
         self.assertTrue(build_exe.validate_zip(Path(self.d.name) / "none.zip"))
@@ -399,7 +399,7 @@ class GitPublishTests(unittest.TestCase):
         self.assertTrue(r["committed"] and r["pushed"])
         self.assertIn("a.py", r["files"])
         log = self.remote_log()
-        self.assertTrue(log.startswith("feat: upgrade to generative AI video rendering via LTX-Video/Stability patterns, fix word-boundary captions, resolve test_uploader, and update build package"))
+        self.assertTrue(log.startswith("refactor: remove avatar and ViMax episode engines; add burned-in subtitles, YouTube trending BGM mixer, and YT/FB/IG captions & tags"))
         self.assertIn("Claude-Session:", log)
 
     def test_second_run_with_nothing_new_does_not_fail_or_commit(self):
@@ -445,7 +445,7 @@ class GitPublishTests(unittest.TestCase):
 class PackagingContentsTests(unittest.TestCase):
     def test_ocr_and_paddle_flags(self):
         args = build.build_pyinstaller_args(ROOT)
-        for mod in ("ocr_engine", "visual_cues", "rapidocr_onnxruntime"):
+        for mod in ("ocr_engine", "rapidocr_onnxruntime"):
             self.assertIn(mod, args)
         self.assertNotIn("paddleocr", args)  # opt-in only
         pad = build.build_pyinstaller_args(ROOT, with_paddleocr=True)
@@ -458,7 +458,7 @@ class PackagingContentsTests(unittest.TestCase):
             self.assertIn(flag, args)
         self.assertNotIn("--onefile", args)
         pairs = list(zip(args, args[1:]))
-        self.assertIn(("--hidden-import", "avatar_sync"), pairs)
+        self.assertIn(("--hidden-import", "subtitle_engine"), pairs)
         self.assertIn(("--hidden-import", "selftest"), pairs)
         datas = [b for a, b in pairs if a == "--add-data"]
         for folder in ("frontend", "models", "bin"):
@@ -473,29 +473,32 @@ class PackagingContentsTests(unittest.TestCase):
         wf = (ROOT / ".github" / "workflows" / "build-windows-exe.yml").read_text(encoding="utf-8")
         self.assertIn("bundle_paddleocr", wf)
         self.assertIn("bundle_torch", wf)
-        self.assertIn("CinePulseAI-Generative-Portable.zip", wf)
+        self.assertIn("CinePulseAI-ViralClipper-Portable.zip", wf)
 
-    def test_3d_modules_are_bundled_and_torch_is_opt_in(self):
-        for m in ("avatar_3d_engine", "glb_model", "soft_raster", "lipsync_en", "avatar_gestures", "demo_avatars", "render_engine",
-                  "vimax_orchestrator", "novel_adapter", "script_parser", "dependency_graph", "meme_matcher", "asset_manager", "generative_video", "render_engine"):
+    def test_new_modules_are_bundled_and_torch_is_opt_in(self):
+        for m in ("pipeline", "uploader", "scorer", "transcriber", "video_engine", "ocr_engine", "meme_matcher",
+                  "subtitle_engine", "music_finder", "social_metadata"):
             self.assertIn(f"backend/{m}.py", build.REQUIRED_SOURCES)
             self.assertTrue((ROOT / "backend" / f"{m}.py").is_file())
             self.assertIn(m, build_exe.pyinstaller_args(ROOT))
         self.assertNotIn("torch", build_exe.pyinstaller_args(ROOT))
-        on = build_exe.pyinstaller_args(ROOT, with_torch=True)
-        self.assertIn("torch", on)
+        self.assertIn("torch", build_exe.pyinstaller_args(ROOT, with_torch=True))
         args = build_exe.pyinstaller_args(ROOT)
         self.assertIn("--onedir", args)
         self.assertIn("--noconsole", args)
 
-    def test_avatar_module_is_a_required_source_and_exists(self):
-        self.assertIn("backend/avatar_sync.py", build.REQUIRED_SOURCES)
-        self.assertTrue((ROOT / "backend" / "avatar_sync.py").is_file())
+    def test_removed_modules_are_gone_from_the_build(self):
+        gone = ("avatar_sync", "avatar_3d_engine", "vimax_orchestrator", "novel_adapter", "script_parser",
+                "dependency_graph", "asset_manager", "generative_video", "render_engine", "tts_engine")
+        for m in gone:
+            self.assertNotIn(f"backend/{m}.py", build.REQUIRED_SOURCES)
+            self.assertNotIn(m, build_exe.pyinstaller_args(ROOT))
+            self.assertFalse((ROOT / "backend" / f"{m}.py").exists(), m)
 
-    def test_readme_mentions_background_backup_and_avatar(self):
+    def test_readme_mentions_subtitles_music_and_drive_backup(self):
         with tempfile.TemporaryDirectory() as d:
             app = Path(d)
             build_exe.finalize(app, ROOT, include_token=False)
             text = (app / "README.txt").read_text(encoding="utf-8")
-        for needle in ("lip-sync", "background", "token.json", "credentials.json", "CinePulseAI.exe"):
+        for needle in ("subtitles", "background", "token.json", "credentials.json", "CinePulseAI.exe"):
             self.assertIn(needle, text)

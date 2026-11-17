@@ -20,7 +20,7 @@ What it does
      dist/CinePulseAI/, which is where the app looks for them, and verifies it.
 
 Internet is still needed at RUN time for the parts that are online by nature:
-YouTube downloads, edge-tts voices, and the Google Drive upload.
+YouTube downloads, trending-music search and the Google Drive upload.
 
 SECURITY: token.json lets whoever holds it upload to and manage the files this
 app created in YOUR Google Drive. Bundling it makes the folder work on a laptop
@@ -44,11 +44,8 @@ from typing import List, Optional
 ROOT = Path(__file__).resolve().parent
 APP_NAME = "CinePulseAI"
 
-BACKEND_MODULES = ["pipeline", "uploader", "scorer", "transcriber", "tts_engine", "video_engine", "avatar_sync",
-                   "ocr_engine", "visual_cues", "avatar_3d_engine", "glb_model", "soft_raster", "lipsync_en",
-                   "avatar_gestures", "demo_avatars", "render_engine",
-                   "vimax_orchestrator", "novel_adapter", "script_parser", "dependency_graph", "meme_matcher", "asset_manager",
-                   "generative_video"]
+BACKEND_MODULES = ["pipeline", "uploader", "scorer", "transcriber", "video_engine", "ocr_engine", "meme_matcher",
+                   "subtitle_engine", "music_finder", "social_metadata"]
 REQUIRED_SOURCES = [
     "launcher.py", "selftest.py", "frontend/app.py",
     *[f"backend/{m}.py" for m in BACKEND_MODULES],
@@ -60,16 +57,15 @@ COLLECT_ALL = ["streamlit", "mediapipe", "faster_whisper", "cv2", "googleapiclie
 # package cannot break the PyInstaller command line.
 EXTRA_COLLECT_ALL = [
     "ctranslate2", "av", "tokenizers", "onnxruntime",
-    "google_auth_oauthlib", "yt_dlp", "edge_tts",
+    "google_auth_oauthlib", "yt_dlp",
     # on-screen text reading (RapidOCR = the PP-OCR models of PaddleOCR on ONNX; models ship inside the package)
     "rapidocr_onnxruntime", "pyclipper", "shapely", "yaml", "PIL",
 ]
 # PaddleOCR itself is huge (~540 MB) and conflicts with opencv-python, so it is opt-in: build_exe.py --with-paddleocr
 PADDLE_COLLECT_ALL = ["paddleocr", "paddle", "paddlex"]
-# PyTorch is NOT used by the 3-D avatar renderer (numpy + OpenCV) or by anything else in the app, and it adds
-# ~1-2 GB, so it is opt-in: build_exe.py --with-torch (for people who add torch-based avatar models later).
-TORCH_COLLECT_ALL = ["torch", "torchvision", "sentence_transformers",  # the last one: MiniLM for Novel2Video
-                     "diffusers"]  # LTX-Video / Stable Video Diffusion adapters; collected only when installed
+# PyTorch is not used by the app (everything runs on numpy / OpenCV / ONNX / CTranslate2) and adds ~1-2 GB, so it is
+# opt-in: build_exe.py --with-torch.
+TORCH_COLLECT_ALL = ["torch", "torchvision"]
 PIP_NAMES = {  # import name -> pip package name, where they differ
     "cv2": "opencv-python",
     "googleapiclient": "google-api-python-client",
@@ -300,7 +296,7 @@ def assemble(app_dir: Path, root: Path = ROOT, include_token: bool = True) -> Li
         "http://localhost:8501 (the next free port is used if that one is busy).\n"
         "There is no console window; use the 'Quit CinePulse AI' button in the sidebar to stop it.\n"
         "A log is written to cinepulseai.log in this folder.\n\n"
-        "Needs internet for: YouTube downloads, edge-tts voices, Google Drive upload.\n"
+        "Needs internet for: YouTube downloads, trending-music search, Google Drive upload.\n"
         "Transcription, scoring, cropping and merging run fully offline.\n\n"
         "Google Drive: enter your Drive Folder ID in the sidebar. "
         + ("Your sign-in (token.json) is already in this folder - keep the folder private.\n"

@@ -2,7 +2,7 @@
 build_exe.py  -  build the CinePulse AI Windows distribution with PyInstaller.
 
     python build_exe.py --dry-run     # scan + show the PyInstaller arguments, build nothing
-    python build_exe.py               # build dist/CinePulseAI/ and dist/CinePulseAI-Generative-Portable.zip
+    python build_exe.py               # build dist/CinePulseAI/ and dist/CinePulseAI-ViralClipper-Portable.zip
     python build_exe.py --ci          # same, for an unattended CI machine
     python build_exe.py --git-push    # ...then `git add .`, `git commit`, `git push origin main`
     python build_exe.py --git-only    # only the git step (no build)
@@ -47,9 +47,9 @@ from typing import List, Optional
 import build  # shared constants, preflight scan and helpers
 
 ROOT = Path(__file__).resolve().parent
-ZIP_NAME = "CinePulseAI-Generative-Portable.zip"
-COMMIT_MESSAGE = ("feat: upgrade to generative AI video rendering via LTX-Video/Stability patterns, fix word-boundary "
-                  "captions, resolve test_uploader, and update build package")
+ZIP_NAME = "CinePulseAI-ViralClipper-Portable.zip"
+COMMIT_MESSAGE = ("refactor: remove avatar and ViMax episode engines; add burned-in subtitles, YouTube trending BGM mixer, "
+                  "and YT/FB/IG captions & tags")
 COMMIT_TRAILERS = (
     "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>",
     "Claude-Session: https://claude.ai/code/session_01DZZzH74mQWkTiSWum5df7Q",
@@ -180,16 +180,14 @@ def finalize(app_dir: Path, root: Path = ROOT, include_token: bool = True) -> Li
         f"Double-click {build.exe_name()}. Your browser opens the app at http://localhost:8501.\n"
         "There is no console window: use 'Quit CinePulse AI' in the sidebar to stop it.\n"
         "If nothing opens, read cinepulseai.log in this folder.\n\n"
-        "Works offline: transcription, highlight scoring, face-tracked cropping, AI avatar lip-sync,\n"
-        "story videos from an idea, a novel or a screenplay (Idea2Video / Novel2Video / Script2Video, CPU only),\n"
-        "3D avatars (.glb / .vrm: phoneme lip-sync, head + upper-body gestures) shown in a podcast corner frame,\n"
-        "merging, reading on-screen text (OCR), a 3-step episode studio (story -> character / location asset studio -> scene\n"
-        "render with locked reference pictures), and contextual meme reactions (a reaction clip matched to the mood of\n"
-        "each line; put your own clips in the storage\\memes folder or use the in-app starter pack). Needs internet: YouTube downloads, edge-tts voices, Google Drive backup.\n\n"
+        "Viral Clip Studio - works offline on the CPU: transcription (faster-whisper), highlight scoring, face-tracked 9:16\n"
+        "cropping, burned-in word-accurate subtitles (.srt + styled .ass), contextual meme reactions, on-screen text (OCR)\n"
+        "and YouTube Shorts / Instagram Reels / Facebook Reels captions and tags. Needs internet: YouTube downloads,\n"
+        "the optional trending background-music search (yt-dlp, no API key) and Google Drive backup.\n\n"
         "GOOGLE DRIVE AUTO-BACKUP (optional)\n"
         "  The app runs fine without it - everything is saved in the 'outputs' folder here.\n"
-        "  With a Folder ID set, every finished clip, avatar video and story episode (plus its project files) is\n"
-        "  uploaded automatically (including videos with meme reactions and 3D avatars) in the\n"
+        "  With a Folder ID set, every finished clip (with its subtitles and music) is\n"
+        "  uploaded automatically in the\n"
         "  background (temporary network errors are retried). If Drive fails, your files stay on this computer.\n"
         "  token.json       -> put it in THIS folder (next to CinePulseAI.exe) for uploads with no sign-in.\n"
         "  credentials.json -> alternatively put your OAuth client file here; the first upload\n"
@@ -262,12 +260,9 @@ def validate_zip(zip_path: Path, top: Optional[str] = None) -> List[str]:
         app_py = next((f"{top}/{o}" for o in ("_internal/frontend/app.py", "frontend/app.py") if f"{top}/{o}" in names), None)
         if app_py:
             text = zf.read(app_py).decode("utf-8", "replace")
-            for needle in ("CinePulse AI", "Clip Repurposer Studio", "AI Generator Lab",
-                           "Enable AI Avatar Lip-Sync Commentary", "Your own script", "Visual actions",
-                           "Model type", "Avatar position", "Text reader (OCR)", "Animated backdrop",
-                           "Creation mode", "Idea2Video", "Novel2Video", "Script2Video",
-                           "Character consistency", "Camera angle preferences", "Podcast corner avatar overlay",
-                           "Enable Contextual Meme Reactions", "Generate Reference Visuals", "Render the episode"):
+            for needle in ("CinePulse AI", "Viral Clip Studio", "Burn-in Subtitles", "Add Trending YouTube Background Music",
+                           "Scan Trending Tracks", "Auto-Upload to Google Drive", "Enable Contextual Meme Reactions",
+                           "Text reader (OCR)"):
                 if needle not in text:
                     problems.append(f"frontend/app.py in the zip lacks '{needle}'")
         if not any(n.startswith(f"{top}/") for n in names):
@@ -346,7 +341,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--no-zip", action="store_true", help="do not create the final zip")
     ap.add_argument("--with-paddleocr", action="store_true", help="also bundle PaddleOCR (+~540 MB; default is RapidOCR)")
     ap.add_argument("--ultimate", action="store_true", help="bundle PaddleOCR AND PyTorch (equivalent to --with-paddleocr --with-torch; very large)")
-    ap.add_argument("--with-torch", action="store_true", help="also bundle PyTorch (+1-2 GB; the 3-D avatar renderer does not need it)")
+    ap.add_argument("--with-torch", action="store_true", help="also bundle PyTorch (+1-2 GB; the app does not need it)")
     ap.add_argument("--git-push", action="store_true", help="after a successful build: git add ., commit, push origin main")
     ap.add_argument("--git-only", action="store_true", help="only run the git add/commit/push step")
     ap.add_argument("--validate-zip", metavar="ZIP", help="only check an existing final zip, then exit")
