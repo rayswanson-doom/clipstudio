@@ -103,6 +103,14 @@ class LayoutTests(unittest.TestCase):
             page.get_by_role("option", name=option, exact=True).first.wait_for(state="visible", timeout=8000)
             page.keyboard.press("Enter")
 
+    def expand(self, page, label):
+        """Open a Streamlit expander (a <details> element) by its title, unless it is already open."""
+        det = page.locator("details", has=page.locator("summary", has_text=label)).first
+        det.wait_for(state="attached", timeout=15000)
+        det.scroll_into_view_if_needed()
+        if det.get_attribute("open") is None:
+            det.locator("summary").first.click()
+
     def open(self, width=1280, height=800, demo=False):
         page = self.browser.new_page(viewport={"width": width, "height": height})
         self.opened.append(page)
@@ -168,15 +176,17 @@ class LayoutTests(unittest.TestCase):
         sidebar = page.locator('[data-testid="stSidebar"]')
         self.assertTrue(sidebar.get_by_label("Google Drive Folder ID", exact=True).is_visible())
         self.assertTrue(page.get_by_label("YouTube URL", exact=True).is_visible())
-        page.get_by_text("Burn-in Subtitles").first.wait_for(state="visible", timeout=10000)
-        page.get_by_text("Add Trending YouTube Background Music").first.wait_for(state="visible", timeout=10000)
-        page.get_by_text("Auto-Upload to Google Drive").first.wait_for(state="visible", timeout=10000)
+        self.expand(page, "Burned-in subtitles")
+        page.get_by_text("Burn-in Subtitles", exact=True).first.wait_for(state="visible", timeout=10000)
+        self.expand(page, "Background music")
+        page.get_by_text("Add Trending YouTube Background Music", exact=True).first.wait_for(state="visible", timeout=10000)
+        page.get_by_text("Auto-Upload to Google Drive", exact=True).first.wait_for(state="visible", timeout=10000)
         page.get_by_role("button", name="Generate viral clips").wait_for(state="visible", timeout=10000)
         page.close()
 
     def test_subtitle_panel_controls(self):
         page = self.open()
-        page.get_by_text("Burned-in subtitles").first.click()
+        self.expand(page, "Burned-in subtitles")
         page.get_by_label("Font size", exact=True).wait_for(state="visible", timeout=10000)
         page.get_by_label("Colour", exact=True).wait_for(state="visible", timeout=10000)
         self.assert_no_horizontal_overflow(page)
@@ -185,7 +195,7 @@ class LayoutTests(unittest.TestCase):
     def test_music_panel_scan_button_enables_with_the_toggle(self):
         for w, h in ((1280, 800), (390, 844)):
             page = self.open(w, h)
-            page.get_by_text("Background music").first.click()
+            self.expand(page, "Background music")
             scan = page.get_by_role("button", name="Scan Trending Tracks")
             scan.wait_for(state="visible", timeout=10000)
             self.assertTrue(scan.is_disabled())
@@ -199,7 +209,7 @@ class LayoutTests(unittest.TestCase):
 
     def test_meme_reaction_controls(self):
         page = self.open()
-        page.get_by_text("Contextual meme reactions").first.click()
+        self.expand(page, "Contextual meme reactions")
         box = page.get_by_text("Enable Contextual Meme Reactions")
         box.wait_for(state="visible", timeout=10000)
         page.get_by_text("Reaction clip library").wait_for(state="visible", timeout=10000)
@@ -222,7 +232,7 @@ class LayoutTests(unittest.TestCase):
             page = self.open(w, h)
             self.assert_no_horizontal_overflow(page)
             for header in ("Burned-in subtitles", "Background music", "Captions & tags", "Contextual meme reactions"):
-                page.get_by_text(header).first.click()
+                self.expand(page, header)
             self.assert_no_horizontal_overflow(page)
             page.screenshot(path=str(SHOTS / f"{name}_panels_open.png"), full_page=True)
             page.close()
