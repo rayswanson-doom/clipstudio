@@ -47,14 +47,14 @@ class ArgsTests(unittest.TestCase):
             a = self.args(root)
         data = [a[i + 1] for i, x in enumerate(a) if x == "--add-data"]
         targets = sorted(x.rsplit(os.pathsep, 1)[1] for x in data)
-        self.assertEqual(targets, ["bin", "frontend", "models"])
+        self.assertEqual(targets, [".streamlit", "bin", "frontend", "models"])
         self.assertEqual(a[-1], str(root / "launcher.py"))  # script stays last
 
     def test_missing_folders_are_not_added(self):
         with tempfile.TemporaryDirectory() as d:
             a = self.args(Path(d))
         data = [a[i + 1] for i, x in enumerate(a) if x == "--add-data"]
-        self.assertEqual(len(data), 1)  # only frontend
+        self.assertEqual(len(data), 2)  # only frontend + .streamlit (from the real ROOT-less project)
 
     def test_googleapiclient_is_a_required_package_with_correct_pip_name(self):
         self.assertIn("googleapiclient", build.COLLECT_ALL)
@@ -185,7 +185,7 @@ class FinishTests(unittest.TestCase):
             make_project(root, token=GOOD_TOKEN)
             app = self.dist(d)
             copied = build_exe.finalize(app, root)
-            self.assertEqual(copied, ["token.json"])
+            self.assertEqual(copied, ["token.json", ".streamlit/config.toml"])
             self.assertEqual(json.loads((app / "token.json").read_text()), GOOD_TOKEN)
             text = (app / "README.txt").read_text()
             for phrase in ("optional", "credentials.json", "token.json", "cinepulseai.log"):
@@ -197,7 +197,7 @@ class FinishTests(unittest.TestCase):
             root.mkdir()
             make_project(root, token=GOOD_TOKEN)
             app = self.dist(d)
-            self.assertEqual(build_exe.finalize(app, root, include_token=False), [])
+            self.assertEqual(build_exe.finalize(app, root, include_token=False), [".streamlit/config.toml"])
             self.assertFalse((app / "token.json").exists())
 
     def test_verify_finds_files_in_internal_or_beside_exe(self):
@@ -272,7 +272,7 @@ class MainTests(unittest.TestCase):
             self.assertNotIn("WARNING: ffmpeg", out.getvalue())
             self.assertIn("Zip validation passed", out.getvalue())
             self.assertEqual(build_exe.validate_zip(z), [])
-            self.assertEqual(build_exe.ZIP_NAME, "CinePulseAI-ViralClipper-Portable.zip")
+            self.assertEqual(build_exe.ZIP_NAME, "CinePulseAI-StoryRecap-1GB-Portable.zip")
 
     def test_errors_stop_before_pyinstaller(self):
         with tempfile.TemporaryDirectory() as d:
@@ -328,6 +328,7 @@ def make_zip_file(path, skip=(), app_text=None):
         f"{top}/_internal/{(build.WHISPER_REL / 'model.bin').as_posix()}": b"x",
         f"{top}/_internal/frontend/app.py": (app_text if app_text is not None else REAL_APP).encode(),
         f"{top}/README.txt": b"hi",
+        f"{top}/_internal/.streamlit/config.toml": b"[server]\nmaxUploadSize = 1024\n",
         f"{top}/_internal/rapidocr_onnxruntime/models/ch_PP-OCRv4_det_infer.onnx": b"x",
         f"{top}/_internal/rapidocr_onnxruntime/models/ch_PP-OCRv4_rec_infer.onnx": b"x",
     }
@@ -399,7 +400,7 @@ class GitPublishTests(unittest.TestCase):
         self.assertTrue(r["committed"] and r["pushed"])
         self.assertIn("a.py", r["files"])
         log = self.remote_log()
-        self.assertTrue(log.startswith("refactor: remove avatar and ViMax episode engines; add burned-in subtitles, YouTube trending BGM mixer, and YT/FB/IG captions & tags"))
+        self.assertTrue(log.startswith("feat: add 500MB/1GB streamed uploads and single-video story overview compilation"))
         self.assertIn("Claude-Session:", log)
 
     def test_second_run_with_nothing_new_does_not_fail_or_commit(self):
@@ -473,7 +474,7 @@ class PackagingContentsTests(unittest.TestCase):
         wf = (ROOT / ".github" / "workflows" / "build-windows-exe.yml").read_text(encoding="utf-8")
         self.assertIn("bundle_paddleocr", wf)
         self.assertIn("bundle_torch", wf)
-        self.assertIn("CinePulseAI-ViralClipper-Portable.zip", wf)
+        self.assertIn("CinePulseAI-StoryRecap-1GB-Portable.zip", wf)
 
     def test_new_modules_are_bundled_and_torch_is_opt_in(self):
         for m in ("pipeline", "uploader", "scorer", "transcriber", "video_engine", "ocr_engine", "meme_matcher",

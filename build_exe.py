@@ -2,7 +2,7 @@
 build_exe.py  -  build the CinePulse AI Windows distribution with PyInstaller.
 
     python build_exe.py --dry-run     # scan + show the PyInstaller arguments, build nothing
-    python build_exe.py               # build dist/CinePulseAI/ and dist/CinePulseAI-ViralClipper-Portable.zip
+    python build_exe.py               # build dist/CinePulseAI/ and dist/CinePulseAI-StoryRecap-1GB-Portable.zip
     python build_exe.py --ci          # same, for an unattended CI machine
     python build_exe.py --git-push    # ...then `git add .`, `git commit`, `git push origin main`
     python build_exe.py --git-only    # only the git step (no build)
@@ -47,9 +47,8 @@ from typing import List, Optional
 import build  # shared constants, preflight scan and helpers
 
 ROOT = Path(__file__).resolve().parent
-ZIP_NAME = "CinePulseAI-ViralClipper-Portable.zip"
-COMMIT_MESSAGE = ("refactor: remove avatar and ViMax episode engines; add burned-in subtitles, YouTube trending BGM mixer, "
-                  "and YT/FB/IG captions & tags")
+ZIP_NAME = "CinePulseAI-StoryRecap-1GB-Portable.zip"
+COMMIT_MESSAGE = ("feat: add 500MB/1GB streamed uploads and single-video story overview compilation")
 COMMIT_TRAILERS = (
     "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>",
     "Claude-Session: https://claude.ai/code/session_01DZZzH74mQWkTiSWum5df7Q",
@@ -175,6 +174,11 @@ def finalize(app_dir: Path, root: Path = ROOT, include_token: bool = True) -> Li
     if include_token and token.is_file():
         shutil.copy2(token, app_dir / build.TOKEN_REL)
         copied.append("token.json")
+    config = root / ".streamlit" / "config.toml"
+    if config.is_file():  # Streamlit reads .streamlit/config.toml from the folder the exe runs in
+        (app_dir / ".streamlit").mkdir(exist_ok=True)
+        shutil.copy2(config, app_dir / ".streamlit" / "config.toml")
+        copied.append(".streamlit/config.toml")
     (app_dir / "README.txt").write_text(
         "CinePulse AI\n===========\n\n"
         f"Double-click {build.exe_name()}. Your browser opens the app at http://localhost:8501.\n"
@@ -184,6 +188,11 @@ def finalize(app_dir: Path, root: Path = ROOT, include_token: bool = True) -> Li
         "cropping, burned-in word-accurate subtitles (.srt + styled .ass), contextual meme reactions, on-screen text (OCR)\n"
         "and YouTube Shorts / Instagram Reels / Facebook Reels captions and tags. Needs internet: YouTube downloads,\n"
         "the optional trending background-music search (yt-dlp, no API key) and Google Drive backup.\n\n"
+        "BIG VIDEOS AND THE STORY OVERVIEW\n"
+        "  Uploads up to 1 GB (or 500 MB - choose it in the sidebar, applies after a restart; or start with\n"
+        "  --upload-limit 500) are streamed to disk in 4 MB pieces. For the lowest memory use pick a file with\n"
+        "  'video already on this computer' - no upload needed. Tick 'Compile Clips into Single Story Overview /\n"
+        "  Summary Video' to also get one recap video that plays the clips in the order they happen in the source.\n\n"
         "GOOGLE DRIVE AUTO-BACKUP (optional)\n"
         "  The app runs fine without it - everything is saved in the 'outputs' folder here.\n"
         "  With a Folder ID set, every finished clip (with its subtitles and music) is\n"
@@ -250,6 +259,7 @@ def validate_zip(zip_path: Path, top: Optional[str] = None) -> List[str]:
             (f"_internal/{build.BLAZEFACE_REL.as_posix()}", build.BLAZEFACE_REL.as_posix()),
             (f"_internal/{(build.WHISPER_REL / 'model.bin').as_posix()}", (build.WHISPER_REL / "model.bin").as_posix()),
             ("_internal/frontend/app.py", "frontend/app.py"), ("README.txt",),
+            ("_internal/.streamlit/config.toml", ".streamlit/config.toml"),
         ]
         onnx = [n for n in names if n.startswith(f"{top}/") and n.lower().endswith(".onnx") and "rapidocr" in n.lower()]
         if len(onnx) < 2:

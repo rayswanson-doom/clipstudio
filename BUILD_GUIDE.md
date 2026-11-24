@@ -128,3 +128,24 @@ Paste a YouTube link (or upload a video) and the app cuts the best moments into 
 
 Removed in this version: AI avatars, lip-sync, 3D avatars, the podcast layout, Story Studio / ViMax, Novel2Video,
 Episode Studio, generative video and text-to-speech.
+
+
+## Large uploads (500 MB / 1 GB) and Story Overview
+
+**Upload size.** `.streamlit/config.toml` sets `[server] maxUploadSize = 1024`. The launcher passes
+`--server.maxUploadSize` from the sidebar choice (500 MB or 1 GB, saved in `storage/settings.json`,
+or `--upload-limit` / env `CINEPULSE_MAX_UPLOAD_MB`). Streamlit reads this only at start-up, so a changed
+choice applies after restarting the app. Uploads are copied to disk in 4 MB chunks
+(`uploader.save_uploaded_video_streamed`), the in-memory copy is closed and garbage-collected right away.
+Streamlit itself still buffers an upload in RAM while it is received; for files that are already on the
+computer use the **"Video already on this computer"** path box, which uses the file in place (no copy, no limit,
+never deleted). Videos over 20 minutes are transcribed in 10-minute windows to keep memory flat.
+
+**Story Overview.** Tick "Compile Clips into Single Story Overview / Summary Video" (needs 2+ clips).
+`backend/story_recap.build_story_overview_video` orders clips by their start time in the source, normalises each
+to 1080x1920 / 30 fps / AAC 44.1 kHz stereo, joins them, optionally burns subtitles and mixes music, and the
+result gets its own YT/FB/IG captions and tags and is uploaded to Google Drive if connected.
+ffmpeg is called directly with argument lists (no shell, no `ffmpeg-python` dependency).
+
+Build: `python build_exe.py` -> `dist/CinePulseAI/` -> `dist/CinePulseAI-StoryRecap-1GB-Portable.zip`
+(`.streamlit/config.toml` is bundled and also placed beside the exe).

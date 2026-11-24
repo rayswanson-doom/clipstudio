@@ -45,9 +45,9 @@ ROOT = Path(__file__).resolve().parent
 APP_NAME = "CinePulseAI"
 
 BACKEND_MODULES = ["pipeline", "uploader", "scorer", "transcriber", "video_engine", "ocr_engine", "meme_matcher",
-                   "subtitle_engine", "music_finder", "social_metadata"]
+                   "subtitle_engine", "music_finder", "social_metadata", "story_recap", "upload_limits"]
 REQUIRED_SOURCES = [
-    "launcher.py", "selftest.py", "frontend/app.py",
+    "launcher.py", "selftest.py", "frontend/app.py", ".streamlit/config.toml",
     *[f"backend/{m}.py" for m in BACKEND_MODULES],
 ]
 
@@ -240,6 +240,8 @@ def build_pyinstaller_args(root: Path = ROOT, dist: Optional[Path] = None, work:
         "--paths", str(root / "backend"),
         # Streamlit runs frontend/app.py from disk, so it must exist as a real file.
         "--add-data", f"{root / 'frontend'}{sep}frontend",
+        # server.maxUploadSize (500 MB / 1 GB uploads) and the theme
+        "--add-data", f"{root / '.streamlit'}{sep}.streamlit",
     ]
     for pkg in COLLECT_ALL:
         args += ["--collect-all", pkg]

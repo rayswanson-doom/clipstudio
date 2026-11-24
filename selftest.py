@@ -26,7 +26,7 @@ MODULES = [
     "faster_whisper", "ctranslate2", "googleapiclient.discovery", "googleapiclient.http",
     "google_auth_oauthlib.flow", "google.oauth2.credentials", "yt_dlp",
     "pipeline", "uploader", "scorer", "transcriber", "video_engine", "ocr_engine", "rapidocr_onnxruntime",
-    "subtitle_engine", "music_finder", "social_metadata", "meme_matcher",
+    "subtitle_engine", "music_finder", "social_metadata", "meme_matcher", "story_recap", "upload_limits",
 ]
 
 
@@ -170,6 +170,53 @@ def check_music() -> str:
     return f"BGM mixed with ducking; yt-dlp {yt_dlp.version.__version__}; cache={music_finder.DEFAULT_CACHE}"
 
 
+def check_recap_and_uploads() -> str:
+    """Chunked 1 GB-safe upload copy + upload-limit helpers + recap ordering (no encoding needed)."""
+    import io
+    import tempfile
+
+    import story_recap
+    import upload_limits
+    import uploader
+
+    if upload_limits.normalize(1024) != 1024 or upload_limits.normalize(500) != 500:
+        raise RuntimeError("upload limit choices are wrong")
+    with tempfile.TemporaryDirectory() as d:
+        class _Up:
+            name = "t.mp4"
+
+            def __init__(self):
+                self._b = io.BytesIO(b"x" * (9 * 1024 * 1024))
+                self.closed = False
+
+            def read(self, n=-1):
+                return self._b.read(n)
+
+            def seek(self, *a):
+                return self._b.seek(*a)
+
+            def close(self):
+                self.closed = True
+
+        up = _Up()
+        dest = uploader.save_uploaded_video_streamed(up, str(__import__("pathlib").Path(d) / "t.mp4"))
+        import os
+        if os.path.getsize(dest) != 9 * 1024 * 1024 or not up.closed:
+            raise RuntimeError("chunked upload copy did not finish cleanly")
+        if [p for p in os.listdir(d) if p.endswith(".part")]:
+            raise RuntimeError("partial file left behind")
+    with tempfile.TemporaryDirectory() as d2:
+        import pathlib
+
+        a, b = pathlib.Path(d2) / "a.mp4", pathlib.Path(d2) / "b.mp4"
+        a.write_bytes(b"1")
+        b.write_bytes(b"2")
+        order = story_recap.order_clips([{"start": 30, "output_path": str(b)}, {"start": 5, "output_path": str(a)}])
+        if [pathlib.Path(c["output_path"]).name for c in order] != ["a.mp4", "b.mp4"]:
+            raise RuntimeError("recap clips are not in source order")
+    return "9 MB streamed to disk in chunks; limits 500/1024 MB; recap order OK"
+
+
 def check_social() -> str:
     import social_metadata as sm
 
@@ -268,6 +315,7 @@ def run_all(app_path: Optional[Path] = None, log: Callable[[str], None] = print)
         ("burned-in subtitles (.srt/.ass)", "fail", check_subtitles),
         ("background music mixer", "fail", check_music),
         ("YT/IG/FB captions & tags", "fail", check_social),
+        ("summary compilation + chunked uploads", "fail", check_recap_and_uploads),
         ("auto-meme reactions", "fail", check_memes),
         ("on-screen text (OCR)", "fail", check_ocr),
         ("app page", "fail", lambda: check_app_page(app_path)),

@@ -26,6 +26,7 @@ try:  # package import (backend.pipeline) or plain module (pipeline)
     from . import music_finder
     from . import ocr_engine
     from . import social_metadata
+    from . import story_recap
     from . import subtitle_engine
     from . import transcriber as _transcriber_mod
     from .scorer import find_viral_clips
@@ -38,6 +39,7 @@ except ImportError:  # pragma: no cover
     import music_finder
     import ocr_engine
     import social_metadata
+    import story_recap
     import subtitle_engine
     import transcriber as _transcriber_mod
     from scorer import find_viral_clips
@@ -229,6 +231,51 @@ def _resolve_music(music: Optional[dict], ffmpeg_path, warnings: list, progress)
         return None
 
 
+def _make_recap(clips, spoken_words, out_dir, stem, cfg, music_info, social_cfg, ffmpeg_path, backup, warnings, progress):
+    """Story Overview: join the finished clips in source order. Never raises - problems become warnings.
+    Returns (info dict | None, Drive-upload future | None)."""
+    ready = [c for c in clips if c.get("output_path") and os.path.isfile(c["output_path"])]
+    if len(ready) < story_recap.MIN_CLIPS:
+        warnings.append("The story overview was skipped: it needs at least 2 finished clips (raise 'Number of clips').")
+        return None, None
+    target = out_dir / f"{stem}_story_overview.mp4"
+    info = {"output_path": None, "drive_link": None, "error": None, "clip_count": len(ready), "duration": None,
+            "social": None, "subtitled": False, "music_mixed": False, "subtitle_file": None}
+    # the clips already carry their own music; only add it again when some clip is missing it
+    music_path = None
+    if music_info and music_info.get("path") and not all(c.get("music_mixed") for c in ready):
+        music_path = music_info["path"]
+    try:
+        _emit(progress, "Building the story overview video", 0.90)
+        burn = bool(cfg.get("burn_subtitles", True)) and bool(spoken_words)
+        path = story_recap.build_story_overview_video(
+            ready, spoken_words, str(target), music_path=music_path,
+            music_volume=float(cfg.get("music_volume", 0.15)), burn_subtitles=burn, ffmpeg_path=ffmpeg_path, progress=None)
+        info["output_path"] = path
+        info["music_mixed"] = bool(music_path) or all(c.get("music_mixed") for c in ready)
+        srt = Path(path).with_suffix(".srt")
+        info["subtitle_file"] = str(srt) if srt.is_file() else None
+        info["subtitled"] = bool(info["subtitle_file"]) or all(c.get("subtitled") for c in ready)
+        ordered = story_recap.order_clips(ready)
+        info["clips"] = [{"start": c["start"], "end": c["end"]} for c in ordered]
+        info["duration"] = round(sum(float(c.get("duration") or 0.0) for c in ordered), 1)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Story overview failed")
+        warnings.append(f"The story overview could not be built ({exc}).")
+        info["error"] = str(exc)
+        return info, None
+    if social_cfg.get("enabled", True):
+        try:
+            text = story_recap.recap_text(ordered, spoken_words)
+            info["social"] = social_metadata.generate_packages(text, social_cfg.get("topic_keywords") or (),
+                                                               social_cfg.get("use_llm", "auto"))
+            warnings.extend(w for w in info["social"]["warnings"] if w not in warnings)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"Captions and tags for the story overview could not be generated ({exc}).")
+    future = backup.submit(info["output_path"]) if backup else None
+    return info, future
+
+
 def run_vugola_pipeline(
     source: str,
     folder_id: Optional[str],
@@ -250,6 +297,7 @@ def run_vugola_pipeline(
     music: Optional[dict] = None,
     social: Optional[dict] = None,
     upload: bool = True,
+    recap: Optional[dict] = None,
 ) -> dict:
     """Find the best highlights in `source` and export each as a vertical short.
 
@@ -260,6 +308,9 @@ def run_vugola_pipeline(
                        mixed UNDER the speaker. With neither path nor track the top trending track for `query` is used.
     social             {"topic_keywords": [...], "use_llm": "auto|off|groq|gemini"}: YouTube / Instagram / Facebook caption
                        packages per clip (always offline-capable). Pass {"enabled": False} to skip.
+    recap              {"enabled": bool, "burn_subtitles": bool (default True), "music_volume": 0..1}: ALSO join the finished
+                       clips, in the order they happen in the source video, into one Story Overview video (needs 2+ clips),
+                       with combined YouTube / Instagram / Facebook captions + tags, uploaded to Drive like the clips.
     upload             False = never upload to Drive (the user turned Auto-Upload off)
     read_screen_text   also OCR the video every `ocr_interval` s and append the burned-in text to the transcript. If the
                        video has NO speech but does have on-screen text, that text is used to pick the highlights.
@@ -399,6 +450,13 @@ def run_vugola_pipeline(
                     clip["error"] = str(exc)
                 clips.append(clip)
 
+            recap_info = None
+            recap_future = None
+            recap_cfg = {"enabled": False, **(recap or {})}
+            if recap_cfg["enabled"]:
+                recap_info, recap_future = _make_recap(clips, spoken_words, out_dir, stem, recap_cfg, music_info, social_cfg,
+                                                       ffmpeg_path, backup, warnings, progress)
+
             if pending:
                 _emit(progress, "Finishing the Google Drive backup", 0.92)
             for clip, future in pending:
@@ -407,6 +465,12 @@ def run_vugola_pipeline(
                 except Exception as exc:  # the clip stays safe on this computer
                     logger.warning("Drive backup failed for %s: %s", clip["output_path"], exc)
                     clip["error"] = str(exc)
+            if recap_future is not None:
+                try:
+                    recap_info["drive_link"] = recap_future.result()
+                except Exception as exc:  # the recap stays safe on this computer
+                    logger.warning("Drive backup failed for the story overview: %s", exc)
+                    recap_info["error"] = str(exc)
         finally:
             if backup:
                 backup.close()
@@ -417,7 +481,7 @@ def run_vugola_pipeline(
 
         _emit(progress, "Done", 1.0)
         return {"source_path": local, "word_count": len(words), "clips": clips, "transcript": transcript,
-                "screen_text": screen_segments, "music": music_info, "warnings": warnings}
+                "screen_text": screen_segments, "music": music_info, "recap": recap_info, "warnings": warnings}
     finally:
         if downloaded and not keep_download:
             _remove(local)  # temporary working copy of the download

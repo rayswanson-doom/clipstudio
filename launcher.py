@@ -13,6 +13,8 @@ Design notes
     page is never opened twice.
   * bin/ (bundled ffmpeg) is added to PATH and the project root is made
     importable, for both source and frozen layouts.
+  * Browser uploads are capped at 500 MB or 1 GB (1024 MB, the default): `--upload-limit 500`, the
+    CINEPULSE_MAX_UPLOAD_MB variable or the choice saved from the sidebar.
   * If the app is already running on the preferred port, the browser is simply
     pointed at it instead of starting a second copy.
 """
@@ -151,13 +153,30 @@ def open_browser_when_ready(port: int, timeout: float = STARTUP_TIMEOUT) -> thre
 # --------------------------------------------------------------------------- #
 # streamlit
 # --------------------------------------------------------------------------- #
-def build_streamlit_argv(app: Path, port: int) -> list:
+def parse_upload_limit(argv, default: Optional[int] = None) -> int:
+    """MB limit for browser uploads: `--upload-limit 500|1024` > CINEPULSE_MAX_UPLOAD_MB > saved setting > 1024."""
+    import upload_limits
+
+    args = list(argv)
+    for i, a in enumerate(args):
+        value = None
+        if a == "--upload-limit" and i + 1 < len(args):
+            value = args[i + 1]
+        elif a.startswith("--upload-limit="):
+            value = a.split("=", 1)[1]
+        if value is not None:
+            return upload_limits.normalize(value)
+    return default if default is not None else upload_limits.read_limit_mb()
+
+
+def build_streamlit_argv(app: Path, port: int, upload_mb: int = 1024) -> list:
     return [
         "streamlit", "run", str(app),
         "--server.port", str(port),
         "--server.address", HOST,
         "--server.headless", "true",  # we open the browser ourselves
         "--server.fileWatcherType", "none",  # no reload watcher in a packaged app
+        "--server.maxUploadSize", str(int(upload_mb)),  # 500 or 1024 MB, see backend/upload_limits.py
         "--browser.gatherUsageStats", "false",
         "--global.developmentMode", "false",  # required when frozen
         # CinePulse AI dark theme (the injected CSS adds the glass look on top)
@@ -197,7 +216,9 @@ def main() -> int:
 
     print(f"Starting CinePulse AI on http://localhost:{port}  (close this window to stop)")
     open_browser_when_ready(port)
-    sys.argv = build_streamlit_argv(app, port)
+    upload_mb = parse_upload_limit(sys.argv[1:])
+    os.environ[__import__("upload_limits").ENV_VAR] = str(upload_mb)  # the app shows the active cap
+    sys.argv = build_streamlit_argv(app, port, upload_mb)
     try:
         stcli.main()  # blocks until the server stops; normally ends via sys.exit
     except SystemExit as exc:

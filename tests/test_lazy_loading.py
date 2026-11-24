@@ -13,7 +13,7 @@ class LazyLoadingTests(unittest.TestCase):
         code = (
             "import sys; sys.path.insert(0, 'backend')\n"
             "import pipeline, transcriber, video_engine, ocr_engine, scorer, meme_matcher, uploader\n"
-            "import subtitle_engine, music_finder, social_metadata\n"
+            "import subtitle_engine, music_finder, social_metadata, story_recap, upload_limits\n"
             f"bad = [m for m in {HEAVY!r} if m in sys.modules]\n"
             "print('LOADED:' + ','.join(bad))\n"
         )

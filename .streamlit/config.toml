@@ -9,5 +9,10 @@ textColor = "#ECEEF8"
 [client]
 toolbarMode = "minimal"
 
+[server]
+# Largest video that can be uploaded in the browser, in MB (500 or 1024). The packaged exe / launcher.py overrides this
+# with --server.maxUploadSize from the sidebar choice. Uploads are streamed to disk in 4 MB chunks.
+maxUploadSize = 1024
+
 [browser]
 gatherUsageStats = false

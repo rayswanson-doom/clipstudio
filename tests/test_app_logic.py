@@ -4,6 +4,7 @@ This checks WHAT the app renders and which pipeline calls its buttons make. It
 does NOT check visual layout - that is tests/ui/test_layout_playwright.py,
 which needs the real Streamlit server and a browser.
 """
+import os
 import runpy
 import sys
 import tempfile
@@ -14,6 +15,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 import music_finder  # noqa: E402
+import upload_limits  # noqa: E402
 import pipeline  # noqa: E402
 import uploader  # noqa: E402
 
@@ -43,10 +45,23 @@ class FakeUpload:
     name = "my clip.mp4"
 
     def __init__(self, name=None, data=b"video-bytes"):
+        import io
         self.name, self.data = name or self.name, data
+        self.size = len(data)
+        self._io = io.BytesIO(data)
 
     def getbuffer(self):
         return self.data
+
+    def read(self, n=-1):
+        return self._io.read(n)
+
+    def seek(self, pos, whence=0):
+        return self._io.seek(pos, whence)
+
+    def close(self):
+        self.closed = True
+        self._io.close()
 
 
 class FakeSt:
@@ -327,7 +342,7 @@ class MusicPanelTests(unittest.TestCase):
             f = run_app(FakeSt({"music_on": True, "music_query": "lofi chill"}, clicked=["music_scan"]))
         scan.assert_called_once_with("lofi chill", limit=5)
         self.assertEqual(f.session_state["music_tracks"], TRACKS)
-        radio = f.names("radio")[0]
+        radio = [c for c in f.names("radio") if c[2].get("key") == "music_pick"][0]
         self.assertEqual(radio[2]["key"], "music_pick")
         self.assertEqual(len(radio[2]["options"]), 2)
 
@@ -379,6 +394,138 @@ class MusicPanelTests(unittest.TestCase):
         self.assertIn("2.5M views", label)
         self.assertIn("2:30", label)
         self.assertIn("Lofi beat", label)
+
+
+class UploadAndRecapTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
+        env = mock.patch.dict(os.environ, {"CINEPULSE_MAX_UPLOAD_MB": "500"})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_upload_size_selector_in_the_sidebar(self):
+        f = run_app(FakeSt())
+        radio = [c for c in f.names("radio") if c[2].get("key") == "upload_limit"][0]
+        self.assertEqual(radio[2]["options"], ["500 MB", "1 GB (1024 MB)"])
+        self.assertTrue(any("Active now: 500 MB" in c[1][0] for c in f.names("caption")))
+
+    def test_uploader_label_shows_the_active_cap(self):
+        f = run_app(FakeSt())
+        label = [c for c in f.names("file_uploader") if c[2].get("key") == "vugola_file"][0][1][0]
+        self.assertIn("500 MB", label)
+        with mock.patch.dict(os.environ, {"CINEPULSE_MAX_UPLOAD_MB": "1024"}):
+            label = [c for c in run_app(FakeSt()).names("file_uploader") if c[2].get("key") == "vugola_file"][0][1][0]
+        self.assertIn("1 GB", label)
+
+    def test_choice_is_saved_and_applies_after_restart(self):
+        with mock.patch.object(upload_limits, "settings_path", return_value=Path(self.tmp) / "settings.json"):
+            f = run_app(FakeSt({"upload_limit": "1 GB (1024 MB)"}))
+            self.assertEqual(upload_limits.read_limit_mb(env={}), 1024)
+        self.assertTrue(any("Restart CinePulse AI" in c[1][0] for c in f.names("info")))
+
+    def test_file_over_the_cap_is_refused_before_anything_runs(self):
+        big = FakeUpload("huge.mp4", b"x")
+        big.size = 700 * upload_limits.MB
+        with mock.patch.object(pipeline, "run_vugola_pipeline") as rv:
+            f = run_app(FakeSt({"vugola_file": big, "vugola_url": ""}, clicked=["vugola_run"]))
+        rv.assert_not_called()
+        self.assertTrue(any("over the 500 MB limit" in c[1][0] for c in f.names("error")))
+
+    def test_upload_is_streamed_with_the_cap_and_memory_released(self):
+        seen = {}
+        up = FakeUpload("a.mp4", b"abc" * 1000)
+
+        def fake_pipeline(source, *a, **k):
+            seen["exists"] = os.path.isfile(source)
+            return VUGOLA
+
+        with mock.patch.object(pipeline, "run_vugola_pipeline", side_effect=fake_pipeline), \
+                mock.patch.object(uploader, "save_uploaded_video_streamed", wraps=uploader.save_uploaded_video_streamed) as sv:
+            f = run_app(FakeSt({"vugola_file": up}, clicked=["vugola_run"]))
+        self.assertEqual(sv.call_args.kwargs["max_bytes"], 500 * upload_limits.MB)
+        self.assertTrue(seen["exists"])
+        self.assertTrue(up.closed)
+        self.assertTrue(any("saved to disk" in c[1][0] for c in f.names("caption")))
+
+    def test_local_file_path_is_used_in_place_and_never_deleted(self):
+        vid = Path(self.tmp) / "big.mp4"
+        vid.write_bytes(b"v")
+        seen = {}
+
+        def fake_pipeline(source, *a, **k):
+            seen["source"] = source
+            return VUGOLA
+
+        with mock.patch.object(pipeline, "run_vugola_pipeline", side_effect=fake_pipeline), \
+                mock.patch.object(uploader, "save_uploaded_video_streamed") as sv:
+            run_app(FakeSt({"vugola_local_path": f'"{vid}"'}, clicked=["vugola_run"]))
+        self.assertEqual(seen["source"], str(vid.resolve()))
+        sv.assert_not_called()
+        self.assertTrue(vid.exists(), "the user's own file must never be deleted")
+
+    def test_local_path_validation(self):
+        txt = Path(self.tmp) / "notes.txt"
+        txt.write_text("x")
+        mod = __import__("runpy").run_path(str(APP), run_name="not_main") if False else None
+        with mock.patch.dict(sys.modules, {"streamlit": FakeSt()}):
+            ns = runpy.run_path(str(APP), run_name="not_main")
+        lv = ns["local_video_path"]
+        self.assertEqual(lv(""), (None, None))
+        self.assertIn("Could not find", lv(str(Path(self.tmp) / "missing.mp4"))[1])
+        self.assertIn("not supported", lv(str(txt))[1])
+        ok = Path(self.tmp) / "ok.MOV"
+        ok.write_bytes(b"x")
+        self.assertEqual(lv(str(ok)), (str(ok.resolve()), None))
+
+    def test_story_overview_option_and_its_default(self):
+        f = run_app(FakeSt())
+        box = [c for c in f.names("checkbox") if c[2].get("key") == "recap_on"][0]
+        self.assertEqual(box[1][0], "Compile Clips into Single Story Overview / Summary Video")
+        with mock.patch.object(pipeline, "run_vugola_pipeline", return_value=VUGOLA) as rv:
+            run_app(FakeSt({"vugola_url": "u"}, clicked=["vugola_run"]))
+        self.assertIsNone(rv.call_args.kwargs["recap"])
+
+    def test_story_overview_settings_reach_the_pipeline(self):
+        with mock.patch.object(pipeline, "run_vugola_pipeline", return_value=VUGOLA) as rv:
+            run_app(FakeSt({"vugola_url": "u", "recap_on": True, "recap_subs": False, "music_on": True, "music_volume": 30},
+                           clicked=["vugola_run"]))
+        self.assertEqual(rv.call_args.kwargs["recap"], {"enabled": True, "burn_subtitles": False, "music_volume": 0.3})
+
+    def test_story_overview_needs_two_clips(self):
+        with mock.patch.object(pipeline, "run_vugola_pipeline") as rv:
+            f = run_app(FakeSt({"vugola_url": "u", "recap_on": True, "vugola_top_n": 1}, clicked=["vugola_run"]))
+        rv.assert_not_called()
+        self.assertTrue(any("at least 2 clips" in c[1][0] for c in f.names("error")))
+
+    def test_recap_card_shows_preview_download_drive_and_captions(self):
+        out = Path(self.tmp) / "story_overview.mp4"
+        out.write_bytes(b"mp4")
+        recap = {"output_path": str(out), "drive_link": "https://drive/recap", "error": None, "clip_count": 3, "duration": 55.0,
+                 "social": SOCIAL, "subtitled": True, "music_mixed": True}
+        f = FakeSt()
+        f.session_state["vugola_result"] = {**VUGOLA, "recap": recap}
+        run_app(f)
+        self.assertEqual(f.names("video")[0][1][0], str(out))
+        self.assertEqual(f.names("download_button")[0][2]["file_name"], "story_overview.mp4")
+        self.assertTrue(any("Open story overview in Google Drive" in c[1][0] for c in f.names("link_button")))
+        html_ = " ".join(str(c[1][0]) for c in f.names("markdown"))
+        self.assertIn("Story overview", html_)
+        self.assertIn("3 clips", html_)
+        codes = [c[1][0] for c in f.names("code")]
+        self.assertIn("IG TEXT", codes)
+        self.assertEqual(codes.count("IG TEXT"), 2)  # the recap's captions + the clip's own
+
+    def test_recap_error_is_shown_and_no_recap_card_when_missing(self):
+        f = FakeSt()
+        f.session_state["vugola_result"] = {**VUGOLA, "recap": {"output_path": None, "error": "disk full", "social": None,
+                                                                "drive_link": None, "clip_count": 3}}
+        run_app(f)
+        self.assertTrue(any("disk full" in c[1][0] for c in f.names("error")))
+        f = FakeSt()
+        f.session_state["vugola_result"] = {**VUGOLA, "recap": None}
+        run_app(f)
+        self.assertFalse(any("Story overview" in str(c[1][0]) for c in f.names("markdown")))
 
 
 class MemePanelTests(unittest.TestCase):

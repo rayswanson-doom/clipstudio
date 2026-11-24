@@ -176,5 +176,92 @@ class VugolaTests(unittest.TestCase):
         self.assertEqual(up.call_count, len(res["clips"]))
 
 
+    # ---- Story Overview / Summary Compilation -------------------------------------------------------------
+    PICKS = [  # in SCORE order (best first) - the recap must still play them in source order
+        {"start": 1.8, "end": 2.9, "duration": 1.1, "score": 9.0, "reasons": ["number"], "text": "It cost 5 million dollars."},
+        {"start": 0.0, "end": 1.0, "duration": 1.0, "score": 8.0, "reasons": ["hook"], "text": "Stop this is crazy!"},
+        {"start": 0.9, "end": 1.9, "duration": 1.0, "score": 7.0, "reasons": ["question"], "text": "Did you know this secret?"},
+    ]
+
+    def run_recap(self, name, recap=True, **kw):
+        with mock.patch.object(pipeline, "find_viral_clips", return_value=[dict(p) for p in self.PICKS]):
+            return self.run_pipeline(name, recap=recap, **kw)
+
+    def test_recap_is_off_by_default(self):
+        res = self.run_recap("r0", recap=None, upload=False)
+        self.assertIsNone(res["recap"])
+
+    def test_recap_joins_the_clips_in_source_order(self):
+        res = self.run_recap("r1", recap={"enabled": True}, upload=False, subtitles={"enabled": True})
+        rc = res["recap"]
+        self.assertEqual(res["warnings"], [])
+        self.assertTrue(os.path.isfile(rc["output_path"]))
+        self.assertTrue(rc["output_path"].endswith("_story_overview.mp4"))
+        self.assertEqual([c["start"] for c in rc["clips"]], [0.0, 0.9, 1.8])
+        self.assertEqual(rc["clip_count"], 3)
+        info = probe(rc["output_path"])
+        v = next(s for s in info["streams"] if s["codec_type"] == "video")
+        self.assertEqual((v["width"], v["height"]), (1080, 1920))
+        self.assertAlmostEqual(float(info["format"]["duration"]), 3.1, delta=0.5)
+        self.assertTrue(rc["subtitled"])  # every clip already had subtitles, so none are doubled
+        self.assertIsNone(rc["subtitle_file"])
+
+    def test_recap_gets_its_own_subtitles_when_clips_have_none(self):
+        rc = self.run_recap("r2", recap={"enabled": True, "burn_subtitles": True}, upload=False)["recap"]
+        self.assertTrue(rc["subtitled"])
+        self.assertIn("-->", Path(rc["subtitle_file"]).read_text(encoding="utf-8"))
+        rc = self.run_recap("r2b", recap={"enabled": True, "burn_subtitles": False}, upload=False)["recap"]
+        self.assertFalse(rc["subtitled"])
+
+    def test_recap_has_combined_captions_and_tags(self):
+        rc = self.run_recap("r3", recap={"enabled": True}, upload=False)["recap"]
+        pk = rc["social"]
+        self.assertLess(len(pk["youtube"]["title"]), 60)
+        self.assertTrue(15 <= len(pk["instagram"]["hashtags"]) <= 20)
+        self.assertTrue(5 <= len(pk["facebook"]["hashtags"]) <= 8)
+        rc = self.run_recap("r3b", recap={"enabled": True}, upload=False, social={"enabled": False})["recap"]
+        self.assertIsNone(rc["social"])
+
+    def test_recap_is_uploaded_to_drive_with_the_clips(self):
+        with mock.patch.object(pipeline, "upload_to_google_drive", side_effect=lambda p, f: "https://drive/" + os.path.basename(p)) as up:
+            res = self.run_recap("r4", recap={"enabled": True})
+        self.assertEqual(up.call_count, len(res["clips"]) + 1)
+        self.assertEqual(res["recap"]["drive_link"], "https://drive/" + os.path.basename(res["recap"]["output_path"]))
+        self.assertTrue(all(c["drive_link"] for c in res["clips"]))
+
+    def test_recap_not_uploaded_when_auto_upload_is_off(self):
+        with mock.patch.object(pipeline, "upload_to_google_drive") as up:
+            res = self.run_recap("r5", recap={"enabled": True}, upload=False)
+        up.assert_not_called()
+        self.assertIsNone(res["recap"]["drive_link"])
+
+    def test_recap_drive_failure_keeps_the_file(self):
+        with mock.patch.object(pipeline, "upload_to_google_drive", side_effect=RuntimeError("drive down")):
+            res = self.run_recap("r6", recap={"enabled": True})
+        self.assertIn("drive down", res["recap"]["error"])
+        self.assertTrue(os.path.isfile(res["recap"]["output_path"]))
+
+    def test_recap_music_is_not_mixed_twice(self):
+        bgm = os.path.join(self.dir.name, "bgm_r.mp3")
+        subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=500:duration=1", bgm], check=True)
+        with mock.patch.object(pipeline.story_recap, "build_story_overview_video", wraps=pipeline.story_recap.build_story_overview_video) as b:
+            res = self.run_recap("r7", recap={"enabled": True}, upload=False, music={"enabled": True, "path": bgm})
+        self.assertTrue(all(c["music_mixed"] for c in res["clips"]))
+        self.assertIsNone(b.call_args.kwargs["music_path"], "the clips already carry the music")
+        self.assertTrue(res["recap"]["music_mixed"])
+
+    def test_one_clip_or_a_failed_build_only_warns(self):
+        with mock.patch.object(pipeline, "find_viral_clips", return_value=[dict(self.PICKS[0])]):
+            res = self.run_pipeline("r8", recap={"enabled": True}, upload=False)
+        self.assertIsNone(res["recap"])
+        self.assertTrue(any("at least 2" in w for w in res["warnings"]))
+        self.assertEqual(len(res["clips"]), 1)
+        with mock.patch.object(pipeline.story_recap, "build_story_overview_video", side_effect=RuntimeError("disk full")):
+            res = self.run_recap("r9", recap={"enabled": True}, upload=False)
+        self.assertTrue(any("disk full" in w for w in res["warnings"]))
+        self.assertEqual(res["recap"]["error"], "disk full")
+        self.assertTrue(all(os.path.isfile(c["output_path"]) for c in res["clips"]))
+
+
 if __name__ == "__main__":
     unittest.main()

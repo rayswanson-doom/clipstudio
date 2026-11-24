@@ -33,6 +33,7 @@ import streamlit as st  # noqa: E402
 import music_finder  # noqa: E402
 import pipeline  # noqa: E402
 import subtitle_engine  # noqa: E402
+import upload_limits  # noqa: E402
 import uploader  # noqa: E402
 
 APP_NAME = "CinePulse AI"
@@ -261,12 +262,38 @@ def section_header(title: str, subtitle: str) -> None:
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
-def save_upload(uploaded) -> str:
-    """Write a Streamlit UploadedFile to disk and return its path."""
+def save_upload(uploaded, max_bytes: int | None = None) -> str:
+    """Stream a Streamlit UploadedFile to disk in 4 MB chunks and return its path (the in-memory copy is released)."""
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    dest = UPLOAD_DIR / f"{int(time.time())}_{Path(uploaded.name).name}"
-    dest.write_bytes(uploaded.getbuffer())
-    return str(dest)
+    dest = UPLOAD_DIR / f"{int(time.time())}_{uploader.safe_upload_name(getattr(uploaded, 'name', ''))}"
+    return uploader.save_uploaded_video_streamed(uploaded, str(dest), max_bytes=max_bytes)
+
+
+def active_upload_limit_mb() -> int:
+    """The browser-upload cap the server is running with (500 or 1024 MB): set when the app started."""
+    env = os.environ.get(upload_limits.ENV_VAR)
+    if env:
+        return upload_limits.normalize(env)
+    try:
+        value = st.get_option("server.maxUploadSize")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return upload_limits.normalize(value)
+    except Exception:  # noqa: BLE001
+        pass
+    return upload_limits.DEFAULT_MB
+
+
+def local_video_path(text: str) -> tuple[str | None, str | None]:
+    """(path, error) for a video that already sits on this computer: no upload, no copy, no size limit."""
+    raw = (text or "").strip().strip('"').strip("'")
+    if not raw:
+        return None, None
+    p = Path(raw).expanduser()
+    if not p.is_file():
+        return None, f"Could not find that file: {raw}"
+    if p.suffix.lower().lstrip(".") not in VIDEO_TYPES:
+        return None, "That file type is not supported. Use " + ", ".join(VIDEO_TYPES) + "."
+    return str(p.resolve()), None
 
 
 def cleanup_uploads(paths) -> None:
@@ -365,6 +392,23 @@ def render_sidebar() -> str:
         if not folder_id:
             st.info("Enter a Folder ID to turn on automatic Drive backup.")
 
+        st.markdown('<div class="cp-side-title">Upload size</div>', unsafe_allow_html=True)
+        active = active_upload_limit_mb()
+        saved = upload_limits.read_limit_mb()
+        labels = list(upload_limits.CHOICES)
+        choice = st.radio("Largest video you can upload", labels, index=labels.index(upload_limits.label_for(saved)),
+                          key="upload_limit", help="Big files are streamed to disk in 4 MB pieces, so memory stays low. "
+                          "The server reads this once at start-up: a change applies the next time you start the app.")
+        if upload_limits.CHOICES[choice] != saved:
+            try:
+                upload_limits.write_limit_mb(upload_limits.CHOICES[choice])
+            except OSError as exc:
+                st.warning(f"Could not save the choice ({exc}).")
+        if upload_limits.CHOICES[choice] != active:
+            st.info(f"Saved: {choice}. Restart CinePulse AI to use it (running now with {upload_limits.label_for(active)}).")
+        else:
+            st.caption(f"Active now: {upload_limits.label_for(active)}.")
+
         st.markdown('<div class="cp-side-title">Privacy</div>', unsafe_allow_html=True)
         st.markdown(
             '<span class="cp-pill"><span class="cp-dot"></span>Runs on this computer</span> '
@@ -453,6 +497,47 @@ def render_clip_card(i: int, clip: dict) -> None:
             if files:
                 st.caption(f"Subtitles saved next to the clip: {Path(files['srt']).name}, {Path(files['ass']).name}")
         render_social_tabs(i, clip.get("social"))
+
+
+MAX_INLINE_DOWNLOAD = 200 * 1024 * 1024  # bigger recaps are not read into memory for the download button
+
+
+def render_recap_card(recap: dict | None) -> None:
+    """The Story Overview video: preview, download, Drive status and its own YouTube / Instagram / Facebook captions."""
+    if not recap:
+        return
+    with st.container(border=True):
+        st.markdown('<div class="cp-clip-head"><span class="cp-rank">★</span>'
+                    + badge("Story overview", "score")
+                    + (badge(f"{recap['clip_count']} clips", "time") if recap.get("clip_count") else "")
+                    + (badge(f"{recap['duration']}s", "time") if recap.get("duration") else "")
+                    + badge("subtitled" if recap.get("subtitled") else "no subtitles", "ok" if recap.get("subtitled") else "warn")
+                    + (badge("♪ music", "ok") if recap.get("music_mixed") else "")
+                    + badge("backed up" if recap.get("drive_link") else "local only", "ok" if recap.get("drive_link") else "warn")
+                    + "</div>", unsafe_allow_html=True)
+        st.caption("All the clips joined in the order they happen in the source video: a beginning-to-end recap.")
+        path = recap.get("output_path")
+        left, right = st.columns([1, 2])
+        with left:
+            if path and os.path.isfile(path):
+                st.video(path)
+                try:
+                    if os.path.getsize(path) <= MAX_INLINE_DOWNLOAD:
+                        with open(path, "rb") as fh:
+                            st.download_button("⬇ Download story overview", fh.read(), file_name=Path(path).name,
+                                               mime="video/mp4", key=f"dl_recap_{Path(path).name}", use_container_width=True)
+                    else:
+                        st.caption(f"Saved on this computer: {path}")
+                except OSError as exc:
+                    st.caption(f"Download unavailable ({exc}).")
+            elif recap.get("error"):
+                st.error(f"The story overview could not be built: {recap['error']}")
+            if recap.get("drive_link"):
+                st.link_button("Open story overview in Google Drive", recap["drive_link"])
+            elif recap.get("error") and path:
+                st.error(recap["error"])
+        with right:
+            render_social_tabs("recap", recap.get("social"))
 
 
 MEME_MODES = {"Auto (cut away on big reactions, otherwise a corner tile)": "auto", "Corner tile only": "overlay",
@@ -613,7 +698,19 @@ def render_clip_tab(folder_id: str) -> None:
 
     url = st.text_input("YouTube URL", key="vugola_url",
                         placeholder="https://www.youtube.com/watch?v=...")
-    uploaded = st.file_uploader("...or upload a video file", type=VIDEO_TYPES, key="vugola_file")
+    limit_mb = active_upload_limit_mb()
+    uploaded = st.file_uploader(f"...or upload a video file (up to {upload_limits.label_for(limit_mb)})", type=VIDEO_TYPES,
+                                key="vugola_file")
+    if uploaded is not None and upload_limits.too_big(getattr(uploaded, "size", None), limit_mb):
+        st.error(upload_limits.too_big_message(uploaded.name, uploaded.size, limit_mb))
+        uploaded = None
+    local_text = st.text_input("...or use a video already on this computer (best for very large files)", key="vugola_local_path",
+                               placeholder=r"C:\Videos\interview.mp4",
+                               help="Nothing is uploaded or copied: the app reads the file straight from where it is, so "
+                                    "there is no size limit and no extra memory.")
+    local_path, local_error = local_video_path(local_text)
+    if local_error:
+        st.error(local_error)
 
     with st.expander("Clip options"):
         c1, c2, c3 = st.columns(3)
@@ -645,14 +742,23 @@ def render_clip_tab(folder_id: str) -> None:
         writer_label = st.selectbox("Caption writer", list(CAPTION_WRITERS), key="social_writer",
                                     help="Offline works with no key. If you set GROQ_API_KEY or GEMINI_API_KEY (both have free tiers) "
                                          "the wording can be polished; platform limits are enforced either way.")
+    recap_on = st.checkbox("Compile Clips into Single Story Overview / Summary Video", value=False, key="recap_on",
+                           help="Also joins the clips, in the order they happen in the source video, into ONE recap video with "
+                                "its own captions and tags (needs 2 or more clips). Uploaded to Drive too when Auto-Upload is on.")
+    recap_subs = st.checkbox("Burn subtitles into the story overview", value=True, key="recap_subs",
+                             disabled=not recap_on)
     drive_on = st.checkbox("Auto-Upload to Google Drive", value=bool(folder_id), key="drive_on",
                            help="Uploads each finished clip to the Folder ID in the sidebar. Needs the Google sign-in files.")
     if drive_on and not folder_id:
         st.info("Enter a Google Drive Folder ID in the sidebar, or the clips are only saved on this computer.")
 
     if st.button("Generate viral clips", type="primary", key="vugola_run"):
-        if not url.strip() and uploaded is None:
+        if not url.strip() and uploaded is None and not local_path:
             st.warning("Paste a YouTube URL or upload a video first.")
+        elif local_error and uploaded is None and not url.strip():
+            st.error(local_error)
+        elif recap_on and top_n < 2:
+            st.error("The story overview needs at least 2 clips: raise 'Number of clips' to 2 or more.")
         elif min_len > max_len:
             st.error("Min length must not be greater than max length.")
         else:
@@ -660,15 +766,22 @@ def render_clip_tab(folder_id: str) -> None:
             temp = []
             try:
                 source = url.strip()
-                if uploaded is not None:
-                    source = save_upload(uploaded)
+                if local_path:
+                    source = local_path  # used in place; never copied and never deleted
+                elif uploaded is not None:
+                    bar.progress(0.01, text="Saving the upload to disk")
+                    source = save_upload(uploaded, max_bytes=limit_mb * upload_limits.MB)
                     temp.append(source)
+                    uploaded = None  # drop the last reference to the in-memory upload
+                    st.caption(f"Upload saved to disk ({os.path.getsize(source) / upload_limits.MB:,.0f} MB) and memory released.")
                 if music_cfg and music_cfg.get("path"):
                     temp.append(music_cfg["path"])
                 st.session_state["vugola_result"] = pipeline.run_vugola_pipeline(
                     source, folder_id, top_n=top_n, min_len=min_len, max_len=max_len,
                     output_dir=str(OUTPUT_DIR), progress=callback, allow_center_fallback=fallback,
                     read_screen_text=ocr_on, memes=meme_cfg, subtitles=subs_cfg, music=music_cfg, upload=bool(drive_on),
+                    recap={"enabled": True, "burn_subtitles": bool(recap_subs),
+                           "music_volume": (music_cfg or {}).get("volume", 0.15)} if recap_on else None,
                     social={"topic_keywords": [t.strip() for t in topics.split(",") if t.strip()],
                             "use_llm": CAPTION_WRITERS[writer_label]},
                     **({"ocr_backend": OCR_CHOICES[clip_ocr_label]} if ocr_on and OCR_CHOICES[clip_ocr_label] != "auto" else {}),
@@ -695,6 +808,7 @@ def render_clip_tab(folder_id: str) -> None:
             who = f" - {music['channel']}" if music.get("channel") else ""
             link = f" ([source]({music['url']}))" if music.get("url") else ""
             st.info(f"♪ Background music: **{music['title']}**{who}{link}. {music.get('licence_note', '')}")
+        render_recap_card(result.get("recap"))
         for i, clip in enumerate(clips, start=1):
             render_clip_card(i, clip)
 

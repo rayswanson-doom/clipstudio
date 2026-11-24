@@ -89,6 +89,50 @@ def _get_model():
     return _model
 
 
+LONG_MEDIA_SECONDS = 20 * 60  # longer than this is transcribed window by window
+WINDOW_SECONDS = 10 * 60
+
+
+def _flags() -> int:
+    import os
+    import subprocess
+
+    return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+
+def _media_seconds(path: Path):
+    """(ffmpeg path, duration in seconds) or (None, 0.0) when ffmpeg or the duration is not available."""
+    try:
+        try:
+            from . import video_engine as ve
+        except ImportError:  # pragma: no cover
+            import video_engine as ve
+        ff = ve.find_ffmpeg()
+        return ff, float(ve._probe_media(ff, str(path))["duration"] or 0.0)
+    except Exception:  # noqa: BLE001
+        return None, 0.0
+
+
+def _extract_window(ff: str, src: Path, start: float, length: float, dst: Path) -> None:
+    """16 kHz mono WAV of one window (about 19 MB per 10 minutes) - what Whisper wants anyway."""
+    import subprocess
+
+    cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{start:.3f}", "-t", f"{length:.3f}", "-i", str(src),
+           "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(dst)]
+    proc = subprocess.run(cmd, capture_output=True, text=True, creationflags=_flags())
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip()[-300:] or "ffmpeg could not extract the audio")
+
+
+def _collect_words(segments, offset: float = 0.0) -> list:
+    words: list = []
+    for segment in segments:  # lazy generator: transcription happens as it is consumed
+        for w in segment.words or []:
+            words.append({"word": w.word.strip(), "start": round(float(w.start) + offset, 3),
+                          "end": round(float(w.end) + offset, 3), "probability": round(float(w.probability), 4)})
+    return words
+
+
 def transcribe_audio(audio_path: str) -> list:
     """Transcribe `audio_path` and return a flat list of word dicts:
 
@@ -102,6 +146,9 @@ def transcribe_audio(audio_path: str) -> list:
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
     model = _get_model()
+    ff, seconds = _media_seconds(path)
+    if ff and seconds > LONG_MEDIA_SECONDS:
+        return _transcribe_in_windows(model, ff, path, seconds)
     segments, info = model.transcribe(
         str(path),
         word_timestamps=True,
@@ -113,18 +160,32 @@ def transcribe_audio(audio_path: str) -> list:
         info.language, info.language_probability, info.duration,
     )
 
+    return _collect_words(segments)
+
+
+def _transcribe_in_windows(model, ff: str, path: Path, seconds: float) -> list:
+    """Long videos: decode and transcribe WINDOW_SECONDS at a time, so memory use does not grow with the video length
+    (decoding a 2-hour file in one go needs ~0.5 GB of float audio). Window files live in a temp folder that is
+    always removed."""
+    import shutil
+    import tempfile
+
     words: list = []
-    # `segments` is a lazy generator; transcription happens as it is consumed.
-    for segment in segments:
-        for w in segment.words or []:
-            words.append(
-                {
-                    "word": w.word.strip(),
-                    "start": round(float(w.start), 3),
-                    "end": round(float(w.end), 3),
-                    "probability": round(float(w.probability), 4),
-                }
-            )
+    work = tempfile.mkdtemp(prefix="cp_asr_")
+    try:
+        start = 0.0
+        while start < seconds:
+            length = min(WINDOW_SECONDS, seconds - start)
+            if length < 0.5:
+                break
+            wav = Path(work) / "window.wav"
+            _extract_window(ff, path, start, length, wav)
+            segments, info = model.transcribe(str(wav), word_timestamps=True, vad_filter=True, beam_size=5)
+            words.extend(_collect_words(segments, start))
+            wav.unlink(missing_ok=True)
+            start += length
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
     return words
 
 

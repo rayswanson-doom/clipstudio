@@ -90,5 +90,56 @@ class RealModelTest(unittest.TestCase):
         self.assertTrue(out and {"word", "start", "end"} <= set(out[0]))
 
 
+class WindowedTranscriptionTests(unittest.TestCase):
+    """Long media is decoded and transcribed one window at a time (flat RAM); timestamps are shifted back."""
+
+    def test_long_media_is_split_offset_and_cleaned_up(self):
+        calls = []
+
+        class Model:
+            def transcribe(self, path, **k):
+                calls.append(path)
+                self_exists = os.path.isfile(path)
+                calls.append(self_exists)
+                return iter([Seg([W(" hi ", 1.0, 1.5, 0.9)])]), types.SimpleNamespace(language="en", language_probability=1, duration=1)
+
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "long.mp4"
+            src.write_bytes(b"x")
+            made = []
+
+            def fake_extract(ff, s, start, length, dst):
+                made.append((start, length))
+                Path(dst).write_bytes(b"wav")
+
+            with mock.patch.object(transcriber, "WINDOW_SECONDS", 600), \
+                    mock.patch.object(transcriber, "_extract_window", side_effect=fake_extract):
+                words = transcriber._transcribe_in_windows(Model(), "ffmpeg", src, 1500.0)
+        self.assertEqual(made, [(0.0, 600), (600.0, 600), (1200.0, 300.0)])
+        self.assertEqual([w["start"] for w in words], [1.0, 601.0, 1201.0])
+        self.assertEqual([w["word"] for w in words], ["hi"] * 3)
+        self.assertTrue(all(calls[1::2]), "each window file existed while it was transcribed")
+        window_dirs = {os.path.dirname(c) for c in calls[0::2]}
+        self.assertEqual(len(window_dirs), 1)
+        self.assertFalse(os.path.exists(window_dirs.pop()), "temp window folder is removed")
+
+    def test_short_media_uses_the_single_pass_and_long_uses_windows(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "v.mp4"
+            src.write_bytes(b"x")
+            model = mock.Mock()
+            model.transcribe.return_value = (iter([]), types.SimpleNamespace(language="en", language_probability=1, duration=1))
+            with mock.patch.object(transcriber, "_get_model", return_value=model), \
+                    mock.patch.object(transcriber, "_media_seconds", return_value=("ffmpeg", 60.0)), \
+                    mock.patch.object(transcriber, "_transcribe_in_windows") as win:
+                transcriber.transcribe_audio(str(src))
+            win.assert_not_called()
+            with mock.patch.object(transcriber, "_get_model", return_value=model), \
+                    mock.patch.object(transcriber, "_media_seconds", return_value=("ffmpeg", 3 * 3600.0)), \
+                    mock.patch.object(transcriber, "_transcribe_in_windows", return_value=[]) as win:
+                transcriber.transcribe_audio(str(src))
+            win.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

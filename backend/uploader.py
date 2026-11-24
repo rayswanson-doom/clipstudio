@@ -487,6 +487,67 @@ def collect_final_videos(result: dict) -> list:
 
 
 
+# --------------------------------------------------------------------------- #
+# large uploads: stream to disk in small chunks
+# --------------------------------------------------------------------------- #
+UPLOAD_CHUNK = 4 * 1024 * 1024  # 4 MB
+
+
+def safe_upload_name(name: str, fallback: str = "upload.mp4") -> str:
+    """A file name that cannot escape its folder: no directories, no control characters, no leading dots."""
+    base = os.path.basename(str(name or "").replace("\\", "/")).strip()
+    base = "".join(ch for ch in base if ch.isprintable() and ch not in '<>:"|?*\0').lstrip(". ")
+    return base[-120:] or fallback
+
+
+def save_uploaded_video_streamed(uploaded_file, dest_path: str, chunk_size: int = UPLOAD_CHUNK,
+                                 max_bytes: Optional[int] = None) -> str:
+    """Copy a Streamlit UploadedFile (or any binary file object) to `dest_path` in `chunk_size` pieces.
+
+    Only one chunk is held at a time, the data goes to `<dest>.part` first and is renamed when complete (so a failed
+    or too-big upload never leaves a half-written video behind), and afterwards the in-memory upload is closed and
+    garbage-collected to give the RAM back right away. Raises ValueError when more than `max_bytes` arrive.
+    """
+    import gc
+
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    dest = Path(dest_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    written = 0
+    try:
+        try:
+            uploaded_file.seek(0)
+        except (AttributeError, OSError, ValueError):
+            pass
+        with open(part, "wb") as out:
+            while True:
+                chunk = uploaded_file.read(chunk_size)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if max_bytes is not None and written > max_bytes:
+                    raise ValueError(f"The upload is larger than the allowed {max_bytes / (1024 * 1024):g} MB.")
+                out.write(chunk)
+                del chunk
+        os.replace(part, dest)
+    except BaseException:
+        try:
+            part.unlink()
+        except OSError:
+            pass
+        raise
+    finally:
+        try:
+            uploaded_file.close()  # release the in-memory copy at once
+        except Exception:  # noqa: BLE001
+            pass
+        del uploaded_file
+        gc.collect()
+    return str(dest)
+
+
 def zip_folder(folder: str, zip_path: str, skip=("work",)) -> str:
     """Zip a project folder (clips, subtitle files...) for backup, leaving out the
     scratch sub-folders named in `skip`. Returns zip_path."""

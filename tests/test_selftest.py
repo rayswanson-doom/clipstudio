@@ -36,6 +36,9 @@ class RealCheckTests(unittest.TestCase):
         self.assertIn("burned in", selftest.check_subtitles())
         self.assertIn("IG tags", selftest.check_social())
 
+    def test_recap_and_chunked_upload_check_runs_for_real(self):
+        self.assertIn("recap order OK", selftest.check_recap_and_uploads())
+
     def test_app_page_missing_file(self):
         with self.assertRaises(RuntimeError):
             selftest.check_app_page(Path("/no/app.py"))
@@ -60,7 +63,7 @@ class RealCheckTests(unittest.TestCase):
 
 class RunnerTests(unittest.TestCase):
     def patched(self, **overrides):
-        names = ["check_imports", "check_ffmpeg", "check_scorer", "check_face_model", "check_whisper", "check_clip_pipeline",
+        names = ["check_recap_and_uploads", "check_imports", "check_ffmpeg", "check_scorer", "check_face_model", "check_whisper", "check_clip_pipeline",
                  "check_subtitles", "check_music", "check_social", "check_memes", "check_ocr"]
         stack = [mock.patch.object(selftest, n, return_value="fine") for n in names]
         stack.append(mock.patch.object(selftest, "check_app_page", return_value="fine"))
@@ -77,7 +80,7 @@ class RunnerTests(unittest.TestCase):
     def test_all_ok(self):
         results = self.run_with()
         self.assertEqual({r[1] for r in results}, {"ok"})
-        self.assertEqual(len(results), 12)
+        self.assertEqual(len(results), 13)
 
     def test_hard_failure_is_reported(self):
         results = dict((r[0], r[1]) for r in self.run_with("check_face_model"))
